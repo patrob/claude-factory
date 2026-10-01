@@ -6,7 +6,7 @@ source "$(dirname "$0")/../lib/cf-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: cf-ready <owner/repo#N | issue URL | N | next>
+Usage: cf-ready <owner/repo#N | issue URL | N | next | free-text task>
 
 A ticket is ready when it is open, not too big, and at least one of these holds:
   • it has a label from CF_READY_LABELS (default: factory-ready sdv ready)
@@ -14,14 +14,46 @@ A ticket is ready when it is open, not too big, and at least one of these holds:
   • this repo documents a check command: CF_CHECK, .claude-factory/check,
     package.json scripts.test, or a Makefile "test:" target
 
-Exit 0 prints a JSON summary: repo, number, title, url, labels, check_cmd, ready_reasons.
-Exit 1 prints why the ticket is not ready on stderr.
+Anything that is not an issue reference is treated as a free-text task: it runs on a
+local plan stub (no GitHub issue is read, created, or touched) and is ready only when
+this repo documents a check command.
+
+Exit 0 prints a JSON summary: repo, number, title, url, labels, check_cmd, ready_reasons,
+local, body. Exit 1 prints why the ticket is not ready on stderr.
 EOF
 }
 
 case "${1:-}" in -h | --help) usage; exit 0 ;; esac
 cf_require gh jq git
-cf_resolve_issue "${1:-}"
+cf_resolve_issue "$*"
+
+if [[ -n "$CF_TEXT" ]]; then
+  check_cmd=""
+  if top=$(git rev-parse --show-toplevel 2>/dev/null); then
+    check_cmd=$(cf_detect_check "$top" || true)
+  fi
+  if [[ -z "$check_cmd" ]]; then
+    cat >&2 <<EOF
+cf-ready: NOT READY: local task "$CF_TEXT" — no check command in this repo (CF_CHECK,
+  .claude-factory/check, package.json scripts.test, Makefile test:). Free-text tasks
+  need one to prove "done".
+EOF
+    exit 1
+  fi
+  jq -n --arg repo "$CF_REPO" --arg id "$CF_NUM" --arg text "$CF_TEXT" --arg check "$check_cmd" '{
+    repo: $repo,
+    number: $id,
+    title: $text,
+    url: null,
+    labels: [],
+    check_cmd: $check,
+    claimed: false,
+    ready_reasons: ["free-text", "check-command"],
+    local: true,
+    body: $text
+  }'
+  exit 0
+fi
 
 issue=$(gh issue view "$CF_NUM" -R "$CF_REPO" --json number,title,url,labels,body,state) ||
   cf_die "cannot read $CF_REPO#$CF_NUM (does it exist, and is gh authenticated?)"
@@ -80,5 +112,6 @@ jq --arg repo "$CF_REPO" --arg check "$check_cmd" --arg claimed "$CF_CLAIMED_LAB
     labels: [.labels[].name],
     check_cmd: (if $check == "" then null else $check end),
     claimed: ([.labels[].name] | index($claimed) != null),
-    ready_reasons: $reasons
+    ready_reasons: $reasons,
+    local: false
   }' <<<"$issue"

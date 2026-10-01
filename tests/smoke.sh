@@ -27,6 +27,7 @@ cat >"$tmp/stubs/gh" <<'EOF'
 # Minimal gh stub. Issues are JSON files in $CF_TEST_ISSUES/<n>.json.
 set -euo pipefail
 args="$*"
+echo "$args" >>"$CF_TEST_GH_LOG"
 jqexpr=""; prev=""
 for a in "$@"; do [[ "$prev" == "--jq" || "$prev" == "-q" ]] && jqexpr=$a; prev=$a; done
 out() { if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr"; else cat; fi; }
@@ -50,7 +51,8 @@ git add feature.txt && git commit -qm "feat: stub change"
 cf-check && cf-evidence >/dev/null && cf-claim --pr "https://github.com/acme/widget/pull/99" >/dev/null
 EOF
 chmod +x "$tmp/stubs/"*
-export PATH="$tmp/stubs:$plugin/bin:$PATH" CF_TEST_ISSUES="$tmp/issues"
+export PATH="$tmp/stubs:$plugin/bin:$PATH" CF_TEST_ISSUES="$tmp/issues" CF_TEST_GH_LOG="$tmp/gh.log"
+: >"$CF_TEST_GH_LOG"
 unset CF_CHECK CF_PRIMARY_GUARD || true
 
 issue() { # n title labels-json body
@@ -86,6 +88,8 @@ mv Makefile Makefile.off
 expect_rc 1 "vague issue without check command is refused" cf-ready 2
 grep -q "NOT READY" "$tmp/err" && ok "refusal says NOT READY" || bad "stderr: $(cat "$tmp/err")"
 mv Makefile.off Makefile
+expect_rc 1 "malformed #ref still errors" cf-ready "#abc"
+expect_rc 1 "malformed owner/repo#x still errors" cf-ready acme/widget#x
 
 echo "cf-claim / cf-worktree"
 expect_rc 0 "claim #1" cf-claim https://github.com/acme/widget/issues/1
@@ -159,6 +163,20 @@ expect_rc 0 "guarded worktree" cf-worktree
 [[ "$(decision PreToolUse Edit "" "$PWD/Makefile")" == deny ]] && ok "primary edit denied in guard mode" || bad "primary edit allowed"
 [[ "$(decision PreToolUse Edit "" "$tmp/widget-cf-3/Makefile")" == allow ]] && ok "worktree edit allowed in guard mode" || bad "worktree edit denied"
 unset CF_PRIMARY_GUARD
+
+echo "free-text task"
+git clone -q "$tmp/origin.git" "$tmp/gizmo"
+cd "$tmp/gizmo"
+git config user.name "Smoke Test" && git config user.email smoke@example.com
+git remote set-head origin main
+: >"$CF_TEST_GH_LOG"
+
+mv Makefile Makefile.off
+expect_rc 1 "free text without check command is refused" cf-ready "fix flaky retry logic in worker pool"
+mv Makefile.off Makefile
+expect_rc 0 "free text is ready" cf-ready "fix flaky retry logic in worker pool"
+jq -e '.local == true and (.number | test("^local-[0-9a-f]{8}$")) and .url == null and (.ready_reasons | index("free-text"))' "$tmp/out" >/dev/null &&
+  ok "ready JSON is a local task" || bad "ready JSON: $(cat "$tmp/out")"
 
 echo
 echo "$pass passed, $fail failed ($(bash -c 'echo $BASH_VERSION'))"
