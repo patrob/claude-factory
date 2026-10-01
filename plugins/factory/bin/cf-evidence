@@ -48,12 +48,24 @@ commits=$(git -C "$wt" log --oneline --no-decorate "$base_ref..HEAD" 2>/dev/null
 diffstat=$(git -C "$wt" diff --stat "$base_ref...HEAD" 2>/dev/null || true)
 dirty=$(git -C "$wt" status --porcelain)
 
+repo=$(cf_json_get "$claim" .repo)
+issue=$(cf_json_get "$claim" .issue)
+title=$(cf_json_get "$claim" .title)
+url=$(cf_json_get "$claim" .url)
+if [[ "$(cf_json_get "$claim" .local)" == "true" ]]; then
+  closes="Local task — no GitHub issue was created for this change."
+  ticket="$title (local task)"
+else
+  closes="Closes $repo#$issue"
+  ticket="[$title]($url)"
+fi
+
 out="$state_dir/evidence.md"
 cf_render "$CF_PLUGIN_ROOT/templates/evidence.md" \
-  "REPO=$(cf_json_get "$claim" .repo)" \
-  "ISSUE=$(cf_json_get "$claim" .issue)" \
-  "TITLE=$(cf_json_get "$claim" .title)" \
-  "URL=$(cf_json_get "$claim" .url)" \
+  "REPO=$repo" \
+  "ISSUE=$issue" \
+  "CLOSES=$closes" \
+  "TICKET=$ticket" \
   "BRANCH=$(cf_json_get "$claim" .branch)" \
   "BASE=${base:-main}" \
   "CHECK_CMD=$(cf_json_get "$state" .last_check.cmd)" \

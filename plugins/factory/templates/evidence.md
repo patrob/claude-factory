@@ -1,10 +1,10 @@
 ## 🏭 Claude Factory evidence — {{REPO}}#{{ISSUE}}
 
-Closes {{REPO}}#{{ISSUE}}
+{{CLOSES}}
 
 | | |
 |---|---|
-| Ticket | [{{TITLE}}]({{URL}}) |
+| Ticket | {{TICKET}} |
 | Branch | `{{BRANCH}}` → `{{BASE}}` |
 | Check | `{{CHECK_CMD}}` |
 | Result | **{{CHECK_RESULT}}** |

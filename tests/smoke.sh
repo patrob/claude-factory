@@ -192,6 +192,17 @@ wt=$(cat "$tmp/out")
 branch=$(git -C "$wt" branch --show-current)
 [[ "$branch" == cf/local-* && "$branch" == *fix-flaky-retry* ]] && ok "local branch name" || bad "branch: $branch"
 
+echo "local worktree" >"$wt/local.txt" && git -C "$wt" add local.txt && git -C "$wt" commit -qm "feat: local change"
+expect_rc 0 "local check passes" cf-check
+expect_rc 0 "local evidence built" cf-evidence
+ev=$(cat "$tmp/out")
+grep -q "Local task" "$ev" && grep -q "Human merge required" "$ev" && grep -q "✅ PASS" "$ev" &&
+  ! grep -q "Closes" "$ev" && ! grep -q '{{' "$ev" && ok "local evidence rendered" || bad "evidence: $(cat "$ev")"
+expect_rc 0 "record local PR" cf-claim --pr "https://github.com/acme/widget/pull/100"
+
+! grep -qE '^issue (create|view|edit|comment)' "$CF_TEST_GH_LOG" && ok "no GitHub issue touched for the local task" ||
+  bad "gh log: $(cat "$CF_TEST_GH_LOG")"
+
 echo
 echo "$pass passed, $fail failed ($(bash -c 'echo $BASH_VERSION'))"
 ((fail == 0))
