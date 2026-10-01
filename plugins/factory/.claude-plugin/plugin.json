@@ -10,5 +10,12 @@
   "homepage": "https://github.com/patrob/claude-factory",
   "repository": "https://github.com/patrob/claude-factory",
   "license": "MIT",
-  "keywords": ["factory", "workflow", "github-issues", "worktree", "pull-request", "hooks"]
+  "keywords": [
+    "factory",
+    "workflow",
+    "github-issues",
+    "worktree",
+    "pull-request",
+    "hooks"
+  ]
 }

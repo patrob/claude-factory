@@ -8,6 +8,9 @@ and no `--dangerously-skip-permissions`.
 
 MIT licensed, public: <https://github.com/patrob/claude-factory>
 
+
+> **Naming note:** Anthropic reserves plugin names starting with `claude-`. The installable plugin is therefore named `factory` (skills: `/factory:sdv`, `/factory:watch`). The GitHub repo and marketplace id remain `claude-factory` / `patrob/claude-factory`.
+
 ## Install
 
 In Claude Code:

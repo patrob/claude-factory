@@ -1,6 +1,6 @@
 {
   "name": "claude-factory",
-  "description": "Claim one ready ticket → plan → worktree → check → PR + evidence → human merge",
+  "description": "Claim one ready ticket \u2192 plan \u2192 worktree \u2192 check \u2192 PR + evidence \u2192 human merge",
   "owner": {
     "name": "Patrick Robinson",
     "email": "patrick@onpardev.com"
