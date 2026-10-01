@@ -1,5 +1,6 @@
 {
-  "description": "claude-factory: 2-fail hard stop, human-only reset (type cf-reset), never merge",
+  "description": "claude-factory: 2-fail hard stop, human-only reset (type cf-reset), never merge; TypeScript mod draws the factory pane",
+  "modules": ["./register.ts"],
   "hooks": {
     "PreToolUse": [
       {

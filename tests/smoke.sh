@@ -73,6 +73,13 @@ printf 'test:\n\t@test ! -f fail.flag\n' >Makefile
 git add Makefile && git commit -qm init && git push -q origin main
 git remote set-head origin main
 
+echo "mod scaffold"
+[[ -f "$plugin/hooks/register.ts" ]] && grep -q 'export function register' "$plugin/hooks/register.ts" &&
+  ok "register.ts exports register" || bad "register.ts missing"
+jq -e '.modules == ["./register.ts"]' "$plugin/hooks/hooks.json" >/dev/null &&
+  ok "hooks.json modules entry" || bad "hooks.json modules"
+grep -q 'cf-guard.sh' "$plugin/hooks/hooks.json" && ok "bash guard still wired" || bad "bash guard missing"
+
 echo "cf-ready"
 expect_rc 0 "labeled issue is ready" cf-ready 1
 jq -e '.check_cmd == "make test" and (.ready_reasons | index("label:factory-ready"))' "$tmp/out" >/dev/null &&

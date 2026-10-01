@@ -1,12 +1,9 @@
-# factory (Claude Factory plugin)
+# factory (claude-factory plugin)
 
-Claim one ready ticket → plan → worktree → check (2-fail hard stop) → PR + evidence → human merge.
+Installable plugin id: **`factory`** (Anthropic reserves `claude-*` names).
+Marketplace: `patrob/claude-factory`.
 
-- `/factory:sdv <owner/repo#N | URL | N | next>` — one ticket to one PR, then stop for a human to merge
-- `/factory:watch [status|once|drain]` — drain the labeled queue one ticket at a time via headless `claude -p`
-- Type `cf-reset` as a prompt to clear the failure counter after a hard stop (human only)
+Requires Claude Code **≥ 2.1.287** for the TypeScript mod (`/factory-pane`: step strip, status band, hard-stop).
+Skills `/factory:sdv` and `/factory:watch`, `cf-*` bins, and bash `cf-guard.sh` work on older builds; the pane does not draw in VS Code chat or `claude -p`.
 
-Tools on Claude's PATH while enabled: `cf-ready`, `cf-claim`, `cf-worktree`, `cf-check`, `cf-evidence`, `cf-watch`.
-Each takes `--help`.
-
-Full docs: <https://github.com/patrob/claude-factory#readme>
+See the repo root README for install and the hard-stop loop.
