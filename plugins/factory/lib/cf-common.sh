@@ -89,22 +89,33 @@ cf_queue() {
   done | sort -n | uniq
 }
 
-# Sets CF_REPO (owner/name) and CF_NUM from: owner/repo#N, an issue URL, #N, N, or "next".
+# Sets CF_REPO (owner/name) and CF_NUM from: owner/repo#N, an issue URL (http/https, optional
+# www., tolerating a trailing slash/query/fragment), #N, N, or "next" (case-insensitive; empty
+# also means "next"). Dies with a clear message on a /pull/N URL or an unparseable reference.
 cf_resolve_issue() {
-  local ref="${1:-}"
+  local ref="${1:-}" lower
   CF_REPO="" CF_NUM=""
-  case "$ref" in
-    https://github.com/*/issues/*)
-      CF_REPO=$(echo "$ref" | sed -E 's#^https://github.com/([^/]+/[^/]+)/issues/.*#\1#')
-      CF_NUM=$(echo "$ref" | sed -E 's#^.*/issues/([0-9]+).*$#\1#')
+  # Trim surrounding whitespace.
+  ref="${ref#"${ref%%[![:space:]]*}"}"
+  ref="${ref%"${ref##*[![:space:]]}"}"
+  lower=$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    http://github.com/*/pull/* | https://github.com/*/pull/* | http://www.github.com/*/pull/* | https://www.github.com/*/pull/*)
+      cf_die "'$ref' is a pull request, not an issue (use an issue URL, owner/repo#N, N, or 'next')" ;;
+    http://github.com/*/issues/* | https://github.com/*/issues/* | http://www.github.com/*/issues/* | https://www.github.com/*/issues/*)
+      CF_REPO=$(echo "$ref" | sed -E 's#^[Hh][Tt][Tt][Pp][Ss]?://([Ww][Ww][Ww]\.)?[Gg][Ii][Tt][Hh][Uu][Bb]\.[Cc][Oo][Mm]/([^/]+/[^/]+)/issues/.*#\2#')
+      CF_NUM=$(echo "$ref" | sed -E 's#^.*/issues/([0-9]+)([/?#].*)?$#\1#')
       ;;
     */*'#'*) CF_REPO="${ref%%#*}" CF_NUM="${ref##*#}" ;;
     '#'*) CF_NUM="${ref#\#}" ;;
-    '' | next) ;;
+    '' | next) ref=next ;;
     *) CF_NUM="$ref" ;;
   esac
+  if [[ -n "$CF_REPO" && ! "$CF_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    cf_die "cannot parse issue reference '$ref' (use owner/repo#N, an issue URL, N, or 'next')"
+  fi
   [[ -n "$CF_REPO" ]] || CF_REPO=$(cf_current_repo) || exit 1
-  if [[ -z "$ref" || "$ref" == "next" ]]; then
+  if [[ "$ref" == "next" ]]; then
     CF_NUM=$(cf_queue "$CF_REPO" | awk 'NR == 1')
     [[ -n "$CF_NUM" ]] || cf_die "no open, unclaimed issues in $CF_REPO labeled: $CF_QUEUE_LABELS"
   fi

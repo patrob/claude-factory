@@ -25,7 +25,8 @@ allowed-tools:
 
 # claude-factory: one ticket → one PR
 
-Ticket: `$ARGUMENTS` (empty means `next`: the oldest open issue labeled `factory-ready` or `sdv`).
+Ticket: `$ARGUMENTS` — an issue URL, `owner/repo#N`, `N`/`#N` (current repo), or `next`
+(empty also means `next`: the oldest open issue labeled `factory-ready` or `sdv`).
 
 You run a small software factory. The gates are fixed. Do the steps in order. Do not skip a gate,
 and do not work around one. The `cf-*` tools are on your PATH while this plugin is enabled.
