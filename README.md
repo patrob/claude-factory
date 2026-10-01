@@ -34,7 +34,7 @@ Restart Claude Code (or run `/reload-plugins`) after installing.
 
 ### Requirements
 
-- Claude Code with plugin `bin/` support (v2.1.91 or later)
+- Claude Code **v2.1.287 or later** (mods / `ui.render` pane). Older builds still run skills + `cf-*` + bash hooks; the pane simply will not load.
 - `git` 2.31+, [`gh`](https://cli.github.com) (authenticated), and `jq`
 - macOS or Linux, bash 3.2+
 
@@ -49,6 +49,25 @@ The plugin ships executables in `bin/`, so claude.ai and Cowork will not install
 | `cf-reset` (typed as a prompt) | Human only: clear the failure counter after a hard stop. |
 
 Run both from the primary checkout of the repo the tickets belong to.
+
+
+### Factory pane (Claude Mod)
+
+Inspired by [Token Weather / Blast Radius / Replay Theater](https://claude.dev/blog/getting-started-with-claude-code-mods/). Draws in the **CLI and Desktop Code tab** only (not VS Code chat, not `claude -p`).
+
+| Command | What it does |
+|---|---|
+| `/factory-pane` | Open the Factory pane: **1:Claim → 5:PR** strip, status, Prev/Next/Close |
+| Proceed / Reset (in pane) | Human-only: zero the failure counter (same as typing `cf-reset`) |
+| Cancel (in pane) | Close the pane only — does **not** unlock tools |
+
+After two failed `cf-check` runs the pane offers Proceed/Cancel/Reset. **`cf-guard.sh` remains the backstop**. Shared `.claude-factory/` state with `cf-*` — no second ledger. Band above the prompt shows live phase / hard-stop.
+
+```bash
+claude plugin validate ./plugins/factory
+claude plugin test ./plugins/factory
+```
+
 
 ### What `/factory:sdv` does
 

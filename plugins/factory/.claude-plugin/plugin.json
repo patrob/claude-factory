@@ -1,7 +1,7 @@
 {
   "name": "factory",
-  "version": "0.1.0",
-  "description": "Lightweight software factory inside Claude Code: claim one ready ticket, plan, build in a worktree, check with a 2-fail hard stop, open a PR with evidence, then stop for a human to merge.",
+  "version": "0.2.0",
+  "description": "Lightweight software factory inside Claude Code: claim one ready ticket, plan, build in a worktree, check with a 2-fail hard stop, open a PR with evidence, then stop for a human to merge. Includes a TypeScript mod pane (CLI + Desktop Code tab) for steps / status / hard-stop.",
   "author": {
     "name": "Patrick Robinson",
     "email": "patrick@onpardev.com",
