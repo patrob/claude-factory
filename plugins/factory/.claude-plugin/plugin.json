@@ -1,0 +1,14 @@
+{
+  "name": "factory",
+  "version": "0.1.0",
+  "description": "Lightweight software factory inside Claude Code: claim one ready ticket, plan, build in a worktree, check with a 2-fail hard stop, open a PR with evidence, then stop for a human to merge.",
+  "author": {
+    "name": "Patrick Robinson",
+    "email": "patrick@onpardev.com",
+    "url": "https://github.com/patrob"
+  },
+  "homepage": "https://github.com/patrob/claude-factory",
+  "repository": "https://github.com/patrob/claude-factory",
+  "license": "MIT",
+  "keywords": ["factory", "workflow", "github-issues", "worktree", "pull-request", "hooks"]
+}

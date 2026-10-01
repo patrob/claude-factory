@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# cf-claim — claim exactly one ready ticket and seed its plan.
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cf-claim <owner/repo#N | issue URL | N | next> [--remote] [--force]
+      Run cf-ready, then write .claude-factory/claim.json, reset state.json,
+      and seed .claude-factory/plan.md from the plan template.
+      --remote  also comment on the issue and add the factory-claimed label
+      --force   replace an in-progress claim for a different issue
+  cf-claim --pr <url>    record the opened PR (status: awaiting-merge)
+  cf-claim --release     drop the current claim (keeps the failure counter)
+  cf-claim --show        print the current claim
+
+Prints the claim as JSON on success.
+EOF
+}
+
+cf_require gh jq git
+state_dir=$(cf_init_state_dir) || exit 1
+claim="$state_dir/claim.json"
+state="$state_dir/state.json"
+
+ref="" remote=0 force=0
+while (($#)); do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --show)
+      [[ -f "$claim" ]] || cf_die "no active claim"
+      jq --arg dir "$state_dir" '. + {state_dir: $dir}' "$claim"
+      exit 0
+      ;;
+    --pr)
+      [[ -f "$claim" ]] || cf_die "no active claim"
+      [[ -n "${2:-}" ]] || cf_die "--pr needs the PR URL"
+      cf_json_update "$claim" --arg pr "$2" --arg at "$(cf_now)" '.pr = $pr | .status = "awaiting-merge" | .pr_opened_at = $at'
+      cf_log "recorded $2 — waiting for a human to merge"
+      jq . "$claim"
+      exit 0
+      ;;
+    --release)
+      [[ -f "$claim" ]] || cf_die "no active claim"
+      cf_json_update "$claim" --arg at "$(cf_now)" '.status = "released" | .released_at = $at'
+      cf_log "released claim on #$(cf_json_get "$claim" .issue)"
+      exit 0
+      ;;
+    --remote) remote=1 ;;
+    --force) force=1 ;;
+    -*) cf_die "unknown option: $1 (see --help)" ;;
+    *) ref=$1 ;;
+  esac
+  shift
+done
+
+failures=$(cf_failures "$state")
+max=$(cf_max_failures "$state")
+if ((failures >= max)); then
+  cf_hard_stop_message "$failures" "$(cf_json_get "$state" .issue)"
+  exit 3
+fi
+
+ready=$("$(dirname "$0")/cf-ready" "$ref") || exit 1
+num=$(jq -r .number <<<"$ready")
+repo=$(jq -r .repo <<<"$ready")
+
+current=$(cf_json_get "$claim" .issue)
+current_status=$(cf_json_get "$claim" .status)
+if [[ -n "$current" && "$current" != "$num" ]]; then
+  case "$current_status" in
+    claimed | building)
+      ((force)) || cf_die "already working on #$current (status: $current_status). One ticket at a time: finish it, run 'cf-claim --release', or pass --force."
+      ;;
+  esac
+fi
+
+if [[ "$current" == "$num" && "$current_status" != "released" ]]; then
+  cf_log "#$num is already claimed; reusing the claim (failure counter unchanged)"
+else
+  claimed_by=$(git config user.name 2>/dev/null || echo "${USER:-unknown}")
+  guard=false
+  if cf_guard_on; then guard=true; fi
+  jq --arg at "$(cf_now)" --arg by "$claimed_by" --argjson guard "$guard" \
+    --arg root "$(cf_primary_root)" '{
+      issue: .number, repo: .repo, title: .title, url: .url, labels: .labels,
+      check_cmd: .check_cmd, ready_reasons: .ready_reasons,
+      claimed_at: $at, claimed_by: $by, status: "claimed",
+      primary_root: $root, primary_guard: $guard,
+      worktree: null, branch: null, base: null, pr: null
+    }' <<<"$ready" >"$claim"
+  # A new ticket starts at zero failures; re-claiming the same ticket never resets the counter.
+  if [[ "$(cf_json_get "$state" .issue)" != "$num" ]]; then
+    jq -n --argjson issue "$num" --argjson max "$CF_MAX_FAILURES" --arg at "$(cf_now)" \
+      '{issue: $issue, check_failures: 0, max_failures: $max, checks_run: 0, last_check: null, updated_at: $at}' >"$state"
+  fi
+
+  if ! head -n1 "$state_dir/plan.md" 2>/dev/null | grep -qF "$repo#$num:"; then
+    cf_render "$CF_PLUGIN_ROOT/templates/plan.md" \
+      "REPO=$repo" "ISSUE=$num" "TITLE=$(jq -r .title <<<"$ready")" "URL=$(jq -r .url <<<"$ready")" \
+      "CLAIMED_AT=$(jq -r .claimed_at "$claim")" "CLAIMED_BY=$claimed_by" \
+      "CHECK_CMD=$(jq -r '.check_cmd // "none detected — set CF_CHECK"' <<<"$ready")" >"$state_dir/plan.md"
+  fi
+  cf_log "claimed $repo#$num; plan at $state_dir/plan.md"
+fi
+
+if ((remote)); then
+  gh label create "$CF_CLAIMED_LABEL" -R "$repo" --color FBCA04 \
+    --description "Claimed by claude-factory" --force >/dev/null 2>&1 || true
+  gh issue edit "$num" -R "$repo" --add-label "$CF_CLAIMED_LABEL" >/dev/null ||
+    cf_log "warning: could not add label $CF_CLAIMED_LABEL"
+  gh issue comment "$num" -R "$repo" \
+    --body "🏭 Claimed by claude-factory ($(cf_json_get "$claim" .claimed_by), $(cf_json_get "$claim" .claimed_at)). A PR with evidence will follow; a human merges it." >/dev/null ||
+    cf_log "warning: could not comment on the issue"
+fi
+
+jq --arg dir "$state_dir" '. + {state_dir: $dir}' "$claim"

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# cf-worktree — create (or reuse) an isolated sibling worktree for the claimed ticket.
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cf-worktree
+
+Fetches the default branch and adds a worktree at ../<repo>-cf-<issue> on a new
+branch cf/<issue>-<slug>, based on origin/<default branch>. Reuses it if it exists.
+The primary checkout is never checked out, reset, or edited.
+Prints the worktree path on stdout.
+EOF
+}
+
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+cf_require git jq
+state_dir=$(cf_init_state_dir) || exit 1
+claim="$state_dir/claim.json"
+[[ -f "$claim" ]] || cf_die "no active claim — run cf-claim first"
+case "$(cf_json_get "$claim" .status)" in
+  released) cf_die "the claim was released — run cf-claim again" ;;
+esac
+
+root=$(cf_primary_root) || exit 1
+num=$(cf_json_get "$claim" .issue)
+repo=$(cf_json_get "$claim" .repo)
+title=$(cf_json_get "$claim" .title)
+wt="$(dirname "$root")/$(basename "$root")-cf-$num"
+
+before=""
+if cf_guard_on; then before=$(git -C "$root" status --porcelain); fi
+
+base=$(git -C "$root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+if [[ -z "$base" ]] && command -v gh >/dev/null 2>&1; then
+  base=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || true)
+fi
+base=${base:-main}
+
+cf_log "fetching origin/$base"
+git -C "$root" fetch --quiet origin "$base" || cf_die "git fetch origin $base failed"
+
+if [[ -e "$wt" ]]; then
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  [[ "$common" == "$root/.git" ]] || cf_die "$wt exists but is not a worktree of $root — move it aside"
+  branch=$(git -C "$wt" branch --show-current)
+  cf_log "reusing worktree $wt ($branch)"
+else
+  slug=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//' | cut -c1-40 | sed -E 's/-+$//')
+  branch="cf/$num${slug:+-$slug}"
+  if git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$root" worktree add --quiet "$wt" "$branch"
+  else
+    git -C "$root" worktree add --quiet --no-track -b "$branch" "$wt" "origin/$base"
+  fi
+  cf_log "created worktree $wt on $branch from origin/$base"
+fi
+
+if cf_guard_on && [[ "$(git -C "$root" status --porcelain)" != "$before" ]]; then
+  cf_die "primary guard: the primary checkout changed while creating the worktree — stop and inspect $root"
+fi
+
+cf_json_update "$claim" --arg wt "$wt" --arg br "$branch" --arg base "$base" \
+  '.worktree = $wt | .branch = $br | .base = $base | .status = (if .status == "claimed" then "building" else .status end)'
+echo "$wt"

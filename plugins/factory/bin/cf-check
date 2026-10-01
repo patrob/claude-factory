@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# cf-check — run the repo's check in the claimed worktree and count failures (hard stop at 2).
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  cf-check            run the check (in the claim's worktree when there is one)
+  cf-check --status   print the claim and failure counter
+  cf-check --reset    HUMAN ONLY: zero the failure counter (needs a real terminal)
+
+Check command: CF_CHECK, else .claude-factory/check, else package.json scripts.test,
+else a Makefile "test:" target. Each run is logged to .claude-factory/runs/.
+Exit codes: 0 pass, 1 fail, 3 hard stop (CF_MAX_FAILURES failures, default 2).
+EOF
+}
+
+cf_require git jq
+state_dir=$(cf_init_state_dir) || exit 1
+claim="$state_dir/claim.json"
+state="$state_dir/state.json"
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  --status)
+    if [[ ! -f "$state" ]]; then echo "no claude-factory state in $state_dir"; exit 0; fi
+    jq -n --slurpfile s "$state" --arg dir "$state_dir" \
+      --argjson c "$(if [[ -f "$claim" ]]; then cat "$claim"; else echo null; fi)" \
+      '{state_dir: $dir, issue: $s[0].issue, status: $c.status, worktree: $c.worktree, branch: $c.branch, pr: $c.pr,
+        check_failures: $s[0].check_failures, max_failures: $s[0].max_failures,
+        hard_stop: ($s[0].check_failures >= $s[0].max_failures), last_check: $s[0].last_check}'
+    exit 0
+    ;;
+  --reset)
+    [[ -t 0 && -t 1 ]] || cf_die "--reset is human-only: run it from your own terminal, or type cf-reset as a prompt in Claude Code"
+    [[ -f "$state" ]] || cf_die "nothing to reset"
+    cf_json_update "$state" --arg at "$(cf_now)" --arg by "${USER:-human}" \
+      '.check_failures = 0 | .reset_at = $at | .reset_by = $by | .updated_at = $at'
+    echo "cf-check: failure counter reset for #$(cf_json_get "$state" .issue)"
+    exit 0
+    ;;
+  "") ;;
+  *) cf_die "unknown option: $1 (see --help)" ;;
+esac
+
+issue=$(cf_json_get "$state" .issue)
+failures=$(cf_failures "$state")
+max=$(cf_max_failures "$state")
+if [[ -n "$issue" ]] && ((failures >= max)); then
+  cf_hard_stop_message "$failures" "$issue"
+  exit 3
+fi
+
+dir=$(cf_json_get "$claim" .worktree)
+if [[ -z "$dir" ]]; then
+  dir=$(git rev-parse --show-toplevel)
+  [[ -z "$issue" ]] || cf_log "warning: no worktree recorded for #$issue — checking $dir"
+fi
+[[ -d "$dir" ]] || cf_die "worktree $dir does not exist"
+
+cmd=$(cf_detect_check "$dir" || cf_json_get "$claim" .check_cmd || true)
+[[ -n "$cmd" ]] || cf_die "no check command found — set CF_CHECK, add .claude-factory/check, or add a test script"
+
+log="$state_dir/runs/check-${issue:-adhoc}-$(date -u +%Y%m%dT%H%M%SZ).log"
+cf_log "running '$cmd' in $dir"
+set +e
+(cd "$dir" && bash -c "$cmd") 2>&1 | tee "$log"
+rc=${PIPESTATUS[0]}
+set -e
+
+if [[ -z "$issue" ]]; then
+  cf_log "no active claim — result not counted (exit $rc)"
+  exit $((rc == 0 ? 0 : 1))
+fi
+
+result=pass
+((rc == 0)) || result=fail
+cf_json_update "$state" --arg cmd "$cmd" --argjson rc "$rc" --arg log "$log" --arg at "$(cf_now)" --arg result "$result" '
+  .checks_run += 1
+  | .check_failures += (if $result == "fail" then 1 else 0 end)
+  | .last_check = {cmd: $cmd, exit_code: $rc, result: $result, log: $log, at: $at}
+  | .updated_at = $at'
+
+if [[ "$result" == "pass" ]]; then
+  cf_log "PASS — log: $log"
+  exit 0
+fi
+
+failures=$(cf_failures "$state")
+if ((failures >= max)); then
+  cf_hard_stop_message "$failures" "$issue"
+  exit 3
+fi
+cf_log "FAIL ($failures/$max) — log: $log. Fix the cause, then run cf-check once more."
+exit 1

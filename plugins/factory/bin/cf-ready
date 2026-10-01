@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# cf-ready — refuse a ticket unless it looks small and ready to build.
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cf-ready <owner/repo#N | issue URL | N | next>
+
+A ticket is ready when it is open, not too big, and at least one of these holds:
+  • it has a label from CF_READY_LABELS (default: factory-ready sdv ready)
+  • its body has a DONE_WHEN / "Done when" section or Gherkin (Scenario: / Given-When-Then)
+  • this repo documents a check command: CF_CHECK, .claude-factory/check,
+    package.json scripts.test, or a Makefile "test:" target
+
+Exit 0 prints a JSON summary: repo, number, title, url, labels, check_cmd, ready_reasons.
+Exit 1 prints why the ticket is not ready on stderr.
+EOF
+}
+
+case "${1:-}" in -h | --help) usage; exit 0 ;; esac
+cf_require gh jq git
+cf_resolve_issue "${1:-}"
+
+issue=$(gh issue view "$CF_NUM" -R "$CF_REPO" --json number,title,url,labels,body,state) ||
+  cf_die "cannot read $CF_REPO#$CF_NUM (does it exist, and is gh authenticated?)"
+
+[[ "$(jq -r .state <<<"$issue")" == "OPEN" ]] || cf_die "NOT READY: $CF_REPO#$CF_NUM is not open"
+
+labels=$(jq -r '.labels[].name' <<<"$issue")
+body=$(jq -r '.body // ""' <<<"$issue")
+has_label() { grep -qxF "$1" <<<"$labels"; }
+
+# Small: no "too big" label and a bounded task list.
+for l in $CF_TOO_BIG_LABELS; do
+  has_label "$l" && cf_die "NOT READY: $CF_REPO#$CF_NUM is labeled '$l'. Split it into small tickets first."
+done
+tasks=$(grep -cE '^[[:space:]]*[-*][[:space:]]+\[[ xX]\]' <<<"$body" || true)
+if ((tasks > CF_MAX_TASKS)); then
+  cf_die "NOT READY: $CF_REPO#$CF_NUM has $tasks checklist items (max $CF_MAX_TASKS). Split it into small tickets first."
+fi
+
+# Ready: any one signal is enough.
+reasons=()
+for l in $CF_READY_LABELS; do
+  if has_label "$l"; then reasons+=("label:$l"); fi
+done
+if grep -Eiq 'DONE_WHEN|done[ _-]when' <<<"$body"; then reasons+=("done-when"); fi
+if grep -Eq '^[[:space:]]*(Scenario|Scenario Outline|Feature):' <<<"$body" ||
+  { grep -Eq '^[[:space:]]*Given ' <<<"$body" && grep -Eq '^[[:space:]]*When ' <<<"$body" &&
+    grep -Eq '^[[:space:]]*Then ' <<<"$body"; }; then
+  reasons+=("gherkin")
+fi
+check_cmd=""
+if top=$(git rev-parse --show-toplevel 2>/dev/null); then
+  check_cmd=$(cf_detect_check "$top" || true)
+fi
+if [[ -n "$check_cmd" ]]; then reasons+=("check-command"); fi
+
+if ((${#reasons[@]} == 0)); then
+  cat >&2 <<EOF
+cf-ready: NOT READY: $CF_REPO#$CF_NUM — $(jq -r .title <<<"$issue")
+  None of the readiness signals were found:
+    • no label from: $CF_READY_LABELS
+    • no DONE_WHEN / "Done when" section and no Gherkin (Scenario: / Given / When / Then) in the body
+    • no check command in this repo (CF_CHECK, .claude-factory/check, package.json scripts.test, Makefile test:)
+  Fix: add a "Done when" section or a ready label to the issue, or document a check command.
+EOF
+  exit 1
+fi
+
+reasons_json=$(printf '%s\n' "${reasons[@]}" | jq -R . | jq -sc .)
+jq --arg repo "$CF_REPO" --arg check "$check_cmd" --arg claimed "$CF_CLAIMED_LABEL" \
+  --argjson reasons "$reasons_json" '{
+    repo: $repo,
+    number: .number,
+    title: .title,
+    url: .url,
+    labels: [.labels[].name],
+    check_cmd: (if $check == "" then null else $check end),
+    claimed: ([.labels[].name] | index($claimed) != null),
+    ready_reasons: $reasons
+  }' <<<"$issue"

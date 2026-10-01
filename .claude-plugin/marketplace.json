@@ -1,0 +1,15 @@
+{
+  "name": "claude-factory",
+  "description": "Claim one ready ticket → plan → worktree → check → PR + evidence → human merge",
+  "owner": {
+    "name": "Patrick Robinson",
+    "email": "patrick@onpardev.com"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": "./plugins/factory",
+      "description": "Lightweight software factory inside Claude Code"
+    }
+  ]
+}

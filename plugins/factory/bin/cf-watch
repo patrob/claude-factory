@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# cf-watch — headless drain: one labeled issue at a time, each in its own `claude -p` session.
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cf-watch [--dry-run] [--once] [--max N] [--interval SECONDS] [--repo owner/repo]
+
+Run from the primary checkout of the target repo. For each open issue labeled
+factory-ready or sdv (oldest first, skipping factory-claimed and already-attempted
+issues), cf-watch:
+  1. runs cf-claim (which runs cf-ready) and cf-worktree,
+  2. starts `claude -p "/factory:sdv owner/repo#N"` inside the worktree,
+  3. records the outcome in .claude-factory/watch-ledger.jsonl.
+It stops at the first hard stop, or when a run ends without a PR.
+
+  --dry-run           show the queue and exit
+  --once              process one issue, then exit
+  --max N             process at most N issues
+  --interval SECONDS  when the queue is empty, poll again after SECONDS (default: exit)
+  --repo owner/repo   queue source (default: the current repo)
+
+Environment:
+  CF_WATCH_PERMISSION_MODE  headless permission mode (default: acceptEdits)
+  CF_WATCH_ALLOWED_TOOLS    extra comma-separated tool rules, e.g. "Bash(npm install),Bash(npm run *)"
+  CF_WATCH_MODEL            model for the headless sessions (default: your Claude Code default)
+  CF_WATCH_REMOTE=1         pass --remote to cf-claim (comment + factory-claimed label)
+  CF_CLAUDE_BIN             claude executable (default: claude)
+
+cf-watch never passes --dangerously-skip-permissions and never merges.
+EOF
+}
+
+dry_run=0 once=0 max=0 interval=0 repo=""
+while (($#)); do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --dry-run) dry_run=1 ;;
+    --once) once=1 ;;
+    --max) max=${2:?--max needs a number}; shift ;;
+    --interval) interval=${2:?--interval needs seconds}; shift ;;
+    --repo) repo=${2:?--repo needs owner/repo}; shift ;;
+    *) cf_die "unknown option: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+cf_require gh jq git
+bin=$(cd "$(dirname "$0")" && pwd)
+claude_bin=${CF_CLAUDE_BIN:-claude}
+((dry_run)) || cf_require "$claude_bin"
+root=$(cf_primary_root) || exit 1
+cd "$root"
+state_dir=$(cf_init_state_dir) || exit 1
+claim="$state_dir/claim.json"
+state="$state_dir/state.json"
+ledger="$state_dir/watch-ledger.jsonl"
+touch "$ledger"
+repo=${repo:-$(cf_current_repo)}
+
+allowed=(
+  "Bash(cf-ready *)" "Bash(cf-claim *)" "Bash(cf-worktree)" "Bash(cf-check)" "Bash(cf-check --status)"
+  "Bash(cf-evidence)" "Bash(cf-evidence *)"
+  "Bash(git status *)" "Bash(git status)" "Bash(git diff *)" "Bash(git diff)" "Bash(git log *)"
+  "Bash(git add *)" "Bash(git commit *)" "Bash(git push -u origin cf/*)"
+  "Bash(git -C *)" "Bash(gh issue view *)" "Bash(gh pr create *)" "Bash(gh pr view *)"
+  "Read" "Grep" "Glob" "Edit" "Write"
+)
+if [[ -n "${CF_WATCH_ALLOWED_TOOLS:-}" ]]; then
+  IFS=',' read -r -a extra <<<"$CF_WATCH_ALLOWED_TOOLS"
+  allowed+=("${extra[@]}")
+fi
+
+attempted() { jq -r '.issue' "$ledger" | grep -qx "$1"; }
+
+record() { # issue outcome [log] [pr]
+  jq -cn --argjson issue "$1" --arg outcome "$2" --arg log "${3:-}" --arg pr "${4:-}" --arg at "$(cf_now)" \
+    '{issue: $issue, outcome: $outcome, log: $log, pr: $pr, at: $at}' >>"$ledger"
+}
+
+next_issue() {
+  local n
+  for n in $(cf_queue "$repo"); do
+    attempted "$n" || { echo "$n"; return 0; }
+  done
+  return 1
+}
+
+if ((dry_run)); then
+  echo "Queue for $repo (labels: $CF_QUEUE_LABELS; skipping $CF_CLAIMED_LABEL):"
+  for n in $(cf_queue "$repo"); do
+    mark=""
+    if attempted "$n"; then mark="  [already attempted — see $ledger]"; fi
+    printf '  #%s  %s%s\n' "$n" "$(gh issue view "$n" -R "$repo" --json title -q .title)" "$mark"
+  done
+  "$bin/cf-check" --status
+  exit 0
+fi
+
+processed=0
+while :; do
+  failures=$(cf_failures "$state")
+  if [[ -n "$(cf_json_get "$state" .issue)" ]] && ((failures >= $(cf_max_failures "$state"))); then
+    cf_hard_stop_message "$failures" "$(cf_json_get "$state" .issue)"
+    exit 2
+  fi
+  case "$(cf_json_get "$claim" .status)" in
+    claimed | building)
+      cf_die "#$(cf_json_get "$claim" .issue) is still in progress. Finish it or run 'cf-claim --release' before draining."
+      ;;
+  esac
+
+  if ! n=$(next_issue); then
+    if ((interval > 0)); then
+      cf_log "queue empty; polling again in ${interval}s"
+      sleep "$interval"
+      continue
+    fi
+    cf_log "queue drained ($processed processed)"
+    exit 0
+  fi
+
+  log="$state_dir/runs/watch-$n-$(date -u +%Y%m%dT%H%M%SZ).log"
+  claim_args=("$repo#$n")
+  if [[ "${CF_WATCH_REMOTE:-0}" == "1" ]]; then claim_args+=(--remote); fi
+  if ! "$bin/cf-claim" "${claim_args[@]}" >>"$log" 2>&1; then
+    cf_log "#$n not claimable — skipping (see $log)"
+    record "$n" not-ready "$log"
+    continue
+  fi
+  if ! wt=$("$bin/cf-worktree" 2>>"$log"); then
+    record "$n" worktree-failed "$log"
+    cf_die "could not create a worktree for #$n (see $log)"
+  fi
+
+  cf_log "#$n → headless claude in $wt (log: $log)"
+  args=(-p "/factory:sdv $repo#$n" --add-dir "$state_dir"
+    --permission-mode "${CF_WATCH_PERMISSION_MODE:-acceptEdits}")
+  if [[ -n "${CF_WATCH_MODEL:-}" ]]; then args+=(--model "$CF_WATCH_MODEL"); fi
+  args+=(--allowedTools "${allowed[@]}")
+  set +e
+  (cd "$wt" && "$claude_bin" "${args[@]}" </dev/null) >>"$log" 2>&1
+  rc=$?
+  set -e
+
+  pr=$(cf_json_get "$claim" .pr)
+  status=$(cf_json_get "$claim" .status)
+  processed=$((processed + 1))
+  if [[ "$status" == "awaiting-merge" && -n "$pr" ]]; then
+    record "$n" pr-opened "$log" "$pr"
+    cf_log "#$n → $pr (awaiting human merge)"
+  else
+    record "$n" "no-pr(exit:$rc,status:$status)" "$log"
+    failures=$(cf_failures "$state")
+    if ((failures >= $(cf_max_failures "$state"))); then
+      cf_hard_stop_message "$failures" "$n"
+      exit 2
+    fi
+    cf_die "#$n ended without a PR (claude exit $rc, status $status). A human should look at $log"
+  fi
+
+  if ((once)) || ((max > 0 && processed >= max)); then exit 0; fi
+done

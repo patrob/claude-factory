@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# cf-evidence — build the evidence pack used as the PR body.
+set -euo pipefail
+# shellcheck source=../lib/cf-common.sh
+source "$(dirname "$0")/../lib/cf-common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: cf-evidence [--stdout]
+
+Renders templates/evidence.md for the claimed ticket into .claude-factory/evidence.md:
+ticket, branch, commits, diffstat, check command and result, check log tail, and the plan.
+Prints the file path (or the content with --stdout). Use it as the PR body:
+  gh pr create --body-file "$(cf-evidence)" ...
+EOF
+}
+
+to_stdout=0
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  --stdout) to_stdout=1 ;;
+  "") ;;
+  *) cf_die "unknown option: $1 (see --help)" ;;
+esac
+
+cf_require git jq
+state_dir=$(cf_init_state_dir) || exit 1
+claim="$state_dir/claim.json"
+state="$state_dir/state.json"
+[[ -f "$claim" ]] || cf_die "no active claim"
+wt=$(cf_json_get "$claim" .worktree)
+[[ -n "$wt" && -d "$wt" ]] || cf_die "no worktree for this claim — run cf-worktree first"
+base=$(cf_json_get "$claim" .base)
+base_ref="origin/${base:-main}"
+
+result=$(cf_json_get "$state" .last_check.result)
+case "$result" in
+  pass) result_line="✅ PASS" ;;
+  fail) result_line="❌ FAIL — do not merge" ;;
+  *) result_line="⚠️ NOT RUN — do not merge" ;;
+esac
+log=$(cf_json_get "$state" .last_check.log)
+log_tail="(no check log)"
+if [[ -n "$log" && -f "$log" ]]; then log_tail=$(tail -n 40 "$log"); fi
+plan="(no plan written)"
+if [[ -f "$state_dir/plan.md" ]]; then plan=$(cat "$state_dir/plan.md"); fi
+commits=$(git -C "$wt" log --oneline --no-decorate "$base_ref..HEAD" 2>/dev/null || true)
+diffstat=$(git -C "$wt" diff --stat "$base_ref...HEAD" 2>/dev/null || true)
+dirty=$(git -C "$wt" status --porcelain)
+
+out="$state_dir/evidence.md"
+cf_render "$CF_PLUGIN_ROOT/templates/evidence.md" \
+  "REPO=$(cf_json_get "$claim" .repo)" \
+  "ISSUE=$(cf_json_get "$claim" .issue)" \
+  "TITLE=$(cf_json_get "$claim" .title)" \
+  "URL=$(cf_json_get "$claim" .url)" \
+  "BRANCH=$(cf_json_get "$claim" .branch)" \
+  "BASE=${base:-main}" \
+  "CHECK_CMD=$(cf_json_get "$state" .last_check.cmd)" \
+  "CHECK_RESULT=$result_line" \
+  "FAILURES=$(cf_failures "$state")" \
+  "MAX_FAILURES=$(cf_max_failures "$state")" \
+  "CHECKS_RUN=$(cf_json_get "$state" .checks_run)" \
+  "COMMITS=${commits:-(no commits yet)}" \
+  "DIFFSTAT=${diffstat:-(no changes)}" \
+  "UNCOMMITTED=${dirty:+⚠️ The worktree has uncommitted changes that are NOT in this PR.}" \
+  "LOG_TAIL=$log_tail" \
+  "PLAN=$plan" \
+  "GENERATED_AT=$(cf_now)" >"$out"
+
+if ((to_stdout)); then cat "$out"; else echo "$out"; fi
