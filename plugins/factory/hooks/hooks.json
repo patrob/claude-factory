@@ -1,5 +1,6 @@
 {
   "description": "claude-factory: 2-fail hard stop, human-only reset (type cf-reset), never merge",
+  "modules": ["./cockpit.tsx"],
   "hooks": {
     "PreToolUse": [
       {
