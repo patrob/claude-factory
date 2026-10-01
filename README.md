@@ -48,6 +48,8 @@ The plugin ships executables in `bin/`, so claude.ai and Cowork will not install
 | `/factory:watch [status\|once\|drain]` | Show the queue, or drain it one ticket at a time in headless `claude -p` sessions. |
 | `cf-reset` (typed as a prompt) | Human only: clear the failure counter after a hard stop. |
 
+You can paste a ticket (issue reference, URL, or ticket text) or type a free-text task after `/factory:sdv`. A free-text task becomes a local plan stub, not a new GitHub issue.
+
 Run both from the primary checkout of the repo the tickets belong to.
 
 ### What `/factory:sdv` does
