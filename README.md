@@ -44,7 +44,7 @@ The plugin ships executables in `bin/`, so claude.ai and Cowork will not install
 
 | Command | What it does |
 |---|---|
-| `/factory:sdv <ticket>` | Take one ticket to a PR, then stop for a human to merge. `<ticket>` is `owner/repo#N`, an issue URL, `N`, or `next`. |
+| `/factory:sdv <ticket>` | Take one ticket to a PR, then stop for a human to merge. `<ticket>` is `owner/repo#N`, an issue URL, `N`, `next`, or a quoted free-text task. |
 | `/factory:watch [status\|once\|drain]` | Show the queue, or drain it one ticket at a time in headless `claude -p` sessions. |
 | `cf-reset` (typed as a prompt) | Human only: clear the failure counter after a hard stop. |
 
@@ -84,11 +84,23 @@ Ready signals (any one is enough):
   3. `package.json` `scripts.test` (run with npm, pnpm, yarn, or bun, based on the lockfile)
   4. a Makefile `test:` target
 
-On success `cf-ready` prints JSON (`repo`, `number`, `title`, `url`, `labels`, `check_cmd`, `ready_reasons`).
-On failure it exits non-zero and says why on stderr.
+On success `cf-ready` prints JSON (`repo`, `number`, `title`, `url`, `labels`, `check_cmd`,
+`ready_reasons`, `local`, `body`). On failure it exits non-zero and says why on stderr.
 
 `next` and the watch queue use open issues labeled `factory-ready` or `sdv` (`CF_QUEUE_LABELS`),
 oldest first, skipping `factory-claimed`.
+
+## Free-text tasks
+
+Anything passed to `/factory:sdv` that is not an issue reference is a free-text task: it runs on
+a local plan stub instead of a GitHub issue.
+
+- Local id: `local-<hex>`, a deterministic hash of the text (re-running the same text reuses the claim).
+- Worktree: `../<repo>-cf-local-<hex>`.
+- Ready only when this repo documents a check command — free text has no label or `DONE_WHEN` to check instead.
+- No GitHub issue is created, viewed, labeled, or commented on.
+- Not picked up by `next` or `/factory:watch` — free-text tasks are run by name, not queued.
+- The PR still needs a human to merge; the evidence pack says the task is local instead of `Closes owner/repo#N`.
 
 ## The 2-fail hard stop
 
@@ -113,7 +125,7 @@ The hook is a no-op in repos without factory state.
 
 `cf-evidence` renders `templates/evidence.md` into `.claude-factory/evidence.md`, which becomes the PR body:
 
-- the ticket link and `Closes owner/repo#N`
+- the ticket link and `Closes owner/repo#N` (local tasks: a "local task, no GitHub issue" line instead)
 - branch and base
 - the check command, result, and failure count
 - commits and diffstat

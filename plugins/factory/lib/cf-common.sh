@@ -89,26 +89,41 @@ cf_queue() {
   done | sort -n | uniq
 }
 
-# Sets CF_REPO (owner/name) and CF_NUM from: owner/repo#N, an issue URL, #N, N, or "next".
+# Prints a deterministic local task id "local-<8 hex>" derived from TEXT.
+cf_local_id() {
+  printf 'local-%08x\n' "$(printf '%s' "$1" | cksum | awk '{print $1}')"
+}
+
+# Sets CF_REPO, CF_NUM and CF_TEXT from: owner/repo#N, an issue URL, #N, N, "next",
+# or free text (CF_TEXT set, CF_NUM=local-<hex>).
 cf_resolve_issue() {
   local ref="${1:-}"
-  CF_REPO="" CF_NUM=""
+  CF_REPO="" CF_NUM="" CF_TEXT=""
   case "$ref" in
     https://github.com/*/issues/*)
       CF_REPO=$(echo "$ref" | sed -E 's#^https://github.com/([^/]+/[^/]+)/issues/.*#\1#')
       CF_NUM=$(echo "$ref" | sed -E 's#^.*/issues/([0-9]+).*$#\1#')
       ;;
+    *[[:space:]]*) ;; # multi-word input can never match a strict pattern below; falls through to free text
     */*'#'*) CF_REPO="${ref%%#*}" CF_NUM="${ref##*#}" ;;
     '#'*) CF_NUM="${ref#\#}" ;;
     '' | next) ;;
-    *) CF_NUM="$ref" ;;
+    [0-9]*)
+      if [[ "$ref" =~ ^[0-9]+$ ]]; then CF_NUM="$ref"; fi
+      ;;
   esac
+  if [[ -z "$CF_REPO" && -z "$CF_NUM" && -n "$ref" && "$ref" != "next" ]]; then
+    CF_TEXT="$ref"
+    CF_NUM=$(cf_local_id "$ref")
+  fi
   [[ -n "$CF_REPO" ]] || CF_REPO=$(cf_current_repo) || exit 1
+  [[ -n "$CF_TEXT" ]] && return 0
   if [[ -z "$ref" || "$ref" == "next" ]]; then
     CF_NUM=$(cf_queue "$CF_REPO" | awk 'NR == 1')
     [[ -n "$CF_NUM" ]] || cf_die "no open, unclaimed issues in $CF_REPO labeled: $CF_QUEUE_LABELS"
   fi
-  [[ "$CF_NUM" =~ ^[0-9]+$ ]] || cf_die "cannot parse issue reference '$ref' (use owner/repo#N, an issue URL, N, or 'next')"
+  [[ "$CF_NUM" =~ ^[0-9]+$ ]] ||
+    cf_die "cannot parse issue reference '$ref' (use owner/repo#N, an issue URL, N, 'next', or a free-text task)"
 }
 
 # Prints the check command for directory $1 (default: cwd). Returns 1 when none is documented.
