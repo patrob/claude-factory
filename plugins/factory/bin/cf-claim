@@ -7,7 +7,7 @@ source "$(dirname "$0")/../lib/cf-common.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  cf-claim <owner/repo#N | issue URL | N | next> [--remote] [--force]
+  cf-claim <owner/repo#N | issue URL | N | next | free-text task> [--remote] [--force]
       Run cf-ready, then write .claude-factory/claim.json, reset state.json,
       and seed .claude-factory/plan.md from the plan template.
       --remote  also comment on the issue and add the factory-claimed label
@@ -51,7 +51,7 @@ while (($#)); do
     --remote) remote=1 ;;
     --force) force=1 ;;
     -*) cf_die "unknown option: $1 (see --help)" ;;
-    *) ref=$1 ;;
+    *) ref="${ref:+$ref }$1" ;;
   esac
   shift
 done
@@ -89,17 +89,19 @@ else
       check_cmd: .check_cmd, ready_reasons: .ready_reasons,
       claimed_at: $at, claimed_by: $by, status: "claimed",
       primary_root: $root, primary_guard: $guard,
+      local: (.local // false), task: (if .local then .body else null end),
       worktree: null, branch: null, base: null, pr: null
     }' <<<"$ready" >"$claim"
   # A new ticket starts at zero failures; re-claiming the same ticket never resets the counter.
   if [[ "$(cf_json_get "$state" .issue)" != "$num" ]]; then
-    jq -n --argjson issue "$num" --argjson max "$CF_MAX_FAILURES" --arg at "$(cf_now)" \
-      '{issue: $issue, check_failures: 0, max_failures: $max, checks_run: 0, last_check: null, updated_at: $at}' >"$state"
+    jq -n --arg issue "$num" --argjson max "$CF_MAX_FAILURES" --arg at "$(cf_now)" \
+      '{issue: ($issue | tonumber? // $issue), check_failures: 0, max_failures: $max, checks_run: 0, last_check: null, updated_at: $at}' >"$state"
   fi
 
   if ! head -n1 "$state_dir/plan.md" 2>/dev/null | grep -qF "$repo#$num:"; then
     cf_render "$CF_PLUGIN_ROOT/templates/plan.md" \
-      "REPO=$repo" "ISSUE=$num" "TITLE=$(jq -r .title <<<"$ready")" "URL=$(jq -r .url <<<"$ready")" \
+      "REPO=$repo" "ISSUE=$num" "TITLE=$(jq -r .title <<<"$ready")" \
+      "URL=$(jq -r '.url // "local task (no GitHub issue)"' <<<"$ready")" \
       "CLAIMED_AT=$(jq -r .claimed_at "$claim")" "CLAIMED_BY=$claimed_by" \
       "CHECK_CMD=$(jq -r '.check_cmd // "none detected — set CF_CHECK"' <<<"$ready")" >"$state_dir/plan.md"
   fi
@@ -107,13 +109,17 @@ else
 fi
 
 if ((remote)); then
-  gh label create "$CF_CLAIMED_LABEL" -R "$repo" --color FBCA04 \
-    --description "Claimed by claude-factory" --force >/dev/null 2>&1 || true
-  gh issue edit "$num" -R "$repo" --add-label "$CF_CLAIMED_LABEL" >/dev/null ||
-    cf_log "warning: could not add label $CF_CLAIMED_LABEL"
-  gh issue comment "$num" -R "$repo" \
-    --body "🏭 Claimed by claude-factory ($(cf_json_get "$claim" .claimed_by), $(cf_json_get "$claim" .claimed_at)). A PR with evidence will follow; a human merges it." >/dev/null ||
-    cf_log "warning: could not comment on the issue"
+  if [[ "$(cf_json_get "$claim" .local)" == "true" ]]; then
+    cf_log "local task: no GitHub issue to label or comment on; --remote ignored"
+  else
+    gh label create "$CF_CLAIMED_LABEL" -R "$repo" --color FBCA04 \
+      --description "Claimed by claude-factory" --force >/dev/null 2>&1 || true
+    gh issue edit "$num" -R "$repo" --add-label "$CF_CLAIMED_LABEL" >/dev/null ||
+      cf_log "warning: could not add label $CF_CLAIMED_LABEL"
+    gh issue comment "$num" -R "$repo" \
+      --body "🏭 Claimed by claude-factory ($(cf_json_get "$claim" .claimed_by), $(cf_json_get "$claim" .claimed_at)). A PR with evidence will follow; a human merges it." >/dev/null ||
+      cf_log "warning: could not comment on the issue"
+  fi
 fi
 
 jq --arg dir "$state_dir" '. + {state_dir: $dir}' "$claim"

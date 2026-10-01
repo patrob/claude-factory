@@ -178,6 +178,20 @@ expect_rc 0 "free text is ready" cf-ready "fix flaky retry logic in worker pool"
 jq -e '.local == true and (.number | test("^local-[0-9a-f]{8}$")) and .url == null and (.ready_reasons | index("free-text"))' "$tmp/out" >/dev/null &&
   ok "ready JSON is a local task" || bad "ready JSON: $(cat "$tmp/out")"
 
+expect_rc 0 "claim free text" cf-claim "fix flaky retry logic in worker pool"
+jq -e '.local == true and .task == "fix flaky retry logic in worker pool"' .claude-factory/claim.json >/dev/null &&
+  ok "claim.json records the local task" || bad "claim.json: $(cat .claude-factory/claim.json)"
+grep -q "fix flaky retry logic in worker pool" .claude-factory/plan.md &&
+  grep -q "local task (no GitHub issue)" .claude-factory/plan.md &&
+  ok "local plan seeded" || bad "plan.md: $(cat .claude-factory/plan.md)"
+expect_rc 0 "re-claim same text reuses it" cf-claim fix flaky retry logic in worker pool
+
+expect_rc 0 "local worktree created" cf-worktree
+wt=$(cat "$tmp/out")
+[[ "$wt" == "$tmp"/gizmo-cf-local-* && -d "$wt" ]] && ok "local worktree at sibling path" || bad "worktree path: $wt"
+branch=$(git -C "$wt" branch --show-current)
+[[ "$branch" == cf/local-* && "$branch" == *fix-flaky-retry* ]] && ok "local branch name" || bad "branch: $branch"
+
 echo
 echo "$pass passed, $fail failed ($(bash -c 'echo $BASH_VERSION'))"
 ((fail == 0))
