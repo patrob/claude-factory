@@ -87,6 +87,31 @@ expect_rc 1 "vague issue without check command is refused" cf-ready 2
 grep -q "NOT READY" "$tmp/err" && ok "refusal says NOT READY" || bad "stderr: $(cat "$tmp/err")"
 mv Makefile.off Makefile
 
+echo "resolve"
+resolves() { # want_repo want_num ref
+  local rc=0
+  cf-ready "$3" >"$tmp/out" 2>"$tmp/err" || rc=$?
+  if [[ "$rc" == 0 ]] && jq -e --arg r "$1" --argjson n "$2" '.repo == $r and .number == $n' "$tmp/out" >/dev/null; then
+    ok "'$3' -> $1#$2"
+  else
+    bad "'$3' -> want $1#$2 (rc=$rc): $(cat "$tmp/out" "$tmp/err")"
+  fi
+}
+resolves org/repo 1 https://github.com/org/repo/issues/1
+resolves org/repo 1 org/repo#1
+resolves org/repo 1 http://www.github.com/org/repo/issues/1/
+resolves org/repo 1 'https://github.com/org/repo/issues/1#issuecomment-123'
+resolves org/repo 1 'https://github.com/org/repo/issues/1?foo=bar'
+resolves acme/widget 1 1
+resolves acme/widget 1 '#1'
+resolves acme/widget 1 '  1  '
+resolves acme/widget 1 next
+resolves acme/widget 1 NEXT
+expect_rc 1 "pull request URL refused" cf-ready https://github.com/org/repo/pull/1
+grep -q "pull request" "$tmp/err" && ok "pull request error message" || bad "pull request stderr: $(cat "$tmp/err")"
+expect_rc 1 "malformed owner/repo refused" cf-ready a/b/c#1
+expect_rc 1 "non-numeric issue refused" cf-ready https://github.com/org/repo/issues/abc
+
 echo "cf-claim / cf-worktree"
 expect_rc 0 "claim #1" cf-claim https://github.com/acme/widget/issues/1
 [[ -f .claude-factory/plan.md ]] && grep -q "acme/widget#1: Add a widget" .claude-factory/plan.md &&
