@@ -110,7 +110,7 @@ expect_rc 3 "claim refuses while stopped" cf-claim 5
 
 hook() { jq -n --arg e "$1" --arg t "${2:-}" --arg c "${3:-}" --arg p "${4:-}" --arg cwd "$PWD" \
   '{hook_event_name: $e, cwd: $cwd, tool_name: $t, tool_input: {command: $c, file_path: $p}, prompt: $c}' |
-  "$plugin/hooks/cf-guard.sh"; }
+  "${CF_TEST_GUARD:-$plugin/hooks/cf-guard.sh}"; }
 decision() { # prints deny / block / allow (the hook prints nothing to allow)
   local out
   out=$(hook "$@")
@@ -159,6 +159,56 @@ expect_rc 0 "guarded worktree" cf-worktree
 [[ "$(decision PreToolUse Edit "" "$PWD/Makefile")" == deny ]] && ok "primary edit denied in guard mode" || bad "primary edit allowed"
 [[ "$(decision PreToolUse Edit "" "$tmp/widget-cf-3/Makefile")" == allow ]] && ok "worktree edit allowed in guard mode" || bad "worktree edit denied"
 unset CF_PRIMARY_GUARD
+
+echo "sdv without cockpit pane"
+if ! grep -rqiE 'cockpit|ui\.open|AbovePrompt' "$plugin/skills/sdv" "$plugin/bin" "$plugin/lib" "$plugin/hooks/cf-guard.sh"; then
+  ok "sdv path has no cockpit dependency"
+else
+  bad "cockpit reference found in sdv path"
+fi
+if ! grep -rqE 'AbovePrompt|above-prompt' "$plugin"; then
+  ok "no AbovePrompt band in plugin"
+else
+  bad "AbovePrompt band found in plugin"
+fi
+
+issue 6 "Pane-free sdv" '["factory-ready"]' "Done when: it works without the cockpit pane."
+
+cp -R "$plugin" "$tmp/nopane"
+rm -f "$tmp/nopane/hooks/"cockpit*
+jq 'del(.modules)' "$plugin/hooks/hooks.json" >"$tmp/nopane/hooks/hooks.json.new"
+mv "$tmp/nopane/hooks/hooks.json.new" "$tmp/nopane/hooks/hooks.json"
+if ! ls "$tmp/nopane/hooks/"cockpit* >/dev/null 2>&1 && jq -e 'has("modules") | not' "$tmp/nopane/hooks/hooks.json" >/dev/null; then
+  ok "cockpit stripped from plugin copy"
+else
+  bad "cockpit not fully stripped from plugin copy"
+fi
+
+cf-claim --release >/dev/null 2>&1 || true
+old_path=$PATH
+PATH="$tmp/nopane/bin:$PATH"
+
+expect_rc 0 "nopane: ready #6" cf-ready 6
+expect_rc 0 "nopane: claim #6" cf-claim 6
+expect_rc 0 "nopane: worktree" cf-worktree
+wt6=$(cat "$tmp/out")
+[[ "$wt6" == "$tmp/widget-cf-6" ]] && ok "nopane: worktree at sibling path" || bad "nopane: worktree path: $wt6"
+
+[[ "$(CF_TEST_GUARD="$tmp/nopane/hooks/cf-guard.sh" decision PreToolUse Edit "" "$wt6/x.txt")" == allow ]] &&
+  ok "nopane: Edit allowed in worktree" || bad "nopane: Edit denied"
+[[ "$(CF_TEST_GUARD="$tmp/nopane/hooks/cf-guard.sh" decision PreToolUse Bash "gh pr merge 1")" == deny ]] &&
+  ok "nopane: gh pr merge denied" || bad "nopane: merge allowed"
+
+echo ok >"$wt6/pane.txt" && git -C "$wt6" add pane.txt && git -C "$wt6" commit -qm "feat: pane-free"
+
+expect_rc 0 "nopane: check passes" cf-check
+expect_rc 0 "nopane: evidence built" cf-evidence
+ev6=$(cat "$tmp/out")
+grep -q "Closes acme/widget#6" "$ev6" && grep -q "✅ PASS" "$ev6" &&
+  ok "nopane: evidence rendered" || bad "nopane: evidence: $(cat "$ev6")"
+expect_rc 0 "nopane: record PR" cf-claim --pr https://github.com/acme/widget/pull/6
+
+PATH=$old_path
 
 echo
 echo "$pass passed, $fail failed ($(bash -c 'echo $BASH_VERSION'))"
