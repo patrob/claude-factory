@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 
-import { loadClaimStatus } from './cockpit-claim'
+import { claimDetailRows, loadClaimStatus } from './cockpit-claim'
 
 const PANE = 'factory-cockpit'
 const COMMAND = 'factory-cockpit'
@@ -47,8 +47,14 @@ export const register: Register = on => {
     if (status.kind === 'present') {
       return (
         <Box flexDirection="column">
-          <Box key="cockpit-present">
-            <Text>Active claim found — details coming soon.</Text>
+          <Box key="cockpit-present" flexDirection="column">
+            <Text bold>Active claim</Text>
+            {claimDetailRows(status.details).map(row => (
+              <Box key={`cockpit-${row.key}`}>
+                <Text dimColor>{row.label}: </Text>
+                <Text>{row.value}</Text>
+              </Box>
+            ))}
           </Box>
         </Box>
       )
