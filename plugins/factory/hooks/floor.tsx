@@ -115,7 +115,7 @@ async function readSessionUsage($: EngineInterface): Promise<SessionUsageSnap> {
   }
 }
 
-// Start: carry this session's conversation into a system row, then run the skill as a slash command here.
+// Start: read this session, append a user row the model reads (not a system notice), then run the skill here.
 async function startSkill($: EngineInterface, skill: string): Promise<void> {
   if (isStarting) return
   isStarting = true
@@ -134,7 +134,8 @@ async function startSkill($: EngineInterface, skill: string): Promise<void> {
     let carried = text ? 'with this conversation' : 'with no conversation to carry'
     if (text) {
       try {
-        const appended = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+        // type user: the model reads it. type system is a notice the model never reads (2.1.289 SessionAppendArgs).
+        const appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
         if (appended.deny !== undefined) carried = `conversation not carried: ${appended.deny}`
       } catch (err) {
         carried = `conversation not carried: ${String(err)}`

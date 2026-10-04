@@ -46,7 +46,7 @@ The plugin ships executables in `bin/`, so claude.ai and Cowork will not install
 |---|---|
 | `/factory:sdv <ticket>` | Take one ticket to a PR, then stop for a human to merge. `<ticket>` is `owner/repo#N`, an issue URL, `N`, or `next`. |
 | `/factory:watch [status\|once\|drain]` | Show the queue, or drain it one ticket at a time in headless `claude -p` sessions. |
-| `/factory:floor` | Open the factory-floor pane: current ticket, stage, evidence, and the next skill. Read-only. |
+| `/factory:floor` | Open the factory-floor pane: a picture of the one action, running or idle, and a token HUD. Start runs that skill from the pane and carries this session's conversation. |
 | `cf-reset` (typed as a prompt) | Human only: clear the failure counter after a hard stop. |
 
 Run both from the primary checkout of the repo the tickets belong to.
@@ -68,15 +68,15 @@ Run both from the primary checkout of the repo the tickets belong to.
 
 ## Factory floor pane
 
-`/factory:floor` opens a pane that shows where the claimed ticket is in the flow:
+`/factory:floor` opens a pane that shows the one thing that needs attention, drawn as a picture
+(a half-block raster and badge in the terminal, the same picture as SVG on the desktop): a big
+word, a running or idle lamp, and color. Under it: that action in one line, and a compact token
+HUD (in, out, cached, cost). It does not draw the stage rail, the evidence pack, or a merge button.
 
-- **Ticket**: `repo#N`, title, claim status, who claimed it, the issue URL
-- **Stage**: ready → claim → plan → worktree → check → evidence → PR → human merge, each marked done (✓),
-  current (▶), blocked by the hard stop (✗), or not reached (·), with a one-line note
-- **Evidence**: check command, last result, runs and failures, check log, branch, worktree,
-  the evidence pack once `cf-evidence` has built it for the latest passing check, and the PR
-- **Next**: the skill and step to run next (for example `/factory:sdv` · Step 4 · `cf-worktree`),
-  or the human's move (`cf-reset` after a hard stop, merging the PR at the end)
+**Start** runs the current skill (`/factory:sdv`, or `/factory:sdv next`) from the pane.
+It reads this session with `$.session.messages()` and, when there is text, appends a user row
+the model reads, then `$.command.run`. The left prompt stays the conversation. Hard stop and
+human merge have no Start. Refresh re-reads factory state. The pane never merges.
 
 The pane is a Claude Code **mod** (`hooks/floor.tsx`): a `ui.render` hook on the `Pane` component,
 opened with `$.ui.open`. It is not a webview and not a claude.ai artifact. It reads the same files the

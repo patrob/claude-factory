@@ -253,7 +253,7 @@ describe('the pane', () => {
       await ui.press({ key: 'start' })
       expect(h.reads).toBe(1)
       for (const row of h.appended) {
-        expect(row.type).toBe('system')
+        expect(row.type).toBe('user')
         expect(row.content.map(b => (b.type === 'text' ? b.text : '')).join('')).toContain(LEFT_USER_TEXT)
       }
       expect(await ui.find({ text: /Started \/factory:sdv · / })).toBeDefined()
