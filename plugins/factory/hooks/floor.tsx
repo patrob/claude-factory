@@ -1,18 +1,22 @@
-// Factory floor: the one action that needs a person, whether this session is
-// running or idle, and a compact token HUD. `/factory:floor` opens it.
+// Factory floor: the one action that needs a person, drawn as a picture, whether
+// this session is running or idle, and a compact token HUD. `/factory:floor` opens it.
 // It reads the state the cf-* tools write and Claude Code's own usage figures.
-// It never writes factory state, never merges, and offers no action but Refresh.
+// It never writes factory state and never merges. Its controls are Refresh and Start,
+// which runs the current skill in this session with this session's conversation.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { FloorSnapshot } from '../types'
+import { badgeRgba, pictureOf, RASTER_ROWS, rasterCells, rasterColumns, svgMarkup } from './floor-picture'
 import {
   addUsage,
   attentionOf,
+  carriedConversation,
   deriveFloor,
   floorText,
   formatTokenHud,
+  skillCommand,
   stateDirCandidates,
   usageFromApi,
   ZERO_USAGE,
@@ -34,6 +38,9 @@ let isShowing = false
 let openTurns = 0
 // Sum of main-loop turn.step result.usage. Stays empty until a request reports counts.
 let requestUsage: RequestUsage = ZERO_USAGE
+// What the last Start press did, shown under the picture; error marks a start that did not happen.
+let startNote: { text: string; isError: boolean } | null = null
+let isStarting = false
 
 function isSubagent(e: { agentId?: unknown }): boolean {
   return typeof e.agentId === 'string' && e.agentId.length > 0
@@ -108,6 +115,43 @@ async function readSessionUsage($: EngineInterface): Promise<SessionUsageSnap> {
   }
 }
 
+// Start: carry this session's conversation into a system row, then run the skill as a slash command here.
+async function startSkill($: EngineInterface, skill: string): Promise<void> {
+  if (isStarting) return
+  isStarting = true
+  const { command, args } = skillCommand(skill)
+  const label = `/${command}${args ? ` ${args}` : ''}`
+  try {
+    let messages: Awaited<ReturnType<EngineInterface['session']['messages']>>
+    try {
+      messages = await $.session.messages()
+    } catch (err) {
+      startNote = { text: `Not started: could not read this session (${String(err)})`, isError: true }
+      return
+    }
+    // The skill runs in this session, so a row that is not kept loses the label, not the context: say so and start.
+    const text = carriedConversation(messages)
+    let carried = text ? 'with this conversation' : 'with no conversation to carry'
+    if (text) {
+      try {
+        const appended = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } })
+        if (appended.deny !== undefined) carried = `conversation not carried: ${appended.deny}`
+      } catch (err) {
+        carried = `conversation not carried: ${String(err)}`
+      }
+    }
+    startNote = { text: `Starting ${label} · ${carried}`, isError: false }
+    $.ui.invalidate('ui.render')
+    await $.command.run(args ? { command, args } : { command })
+    startNote = { text: `Started ${label} · ${carried}`, isError: false }
+  } catch (err) {
+    startNote = { text: `Not started: ${label} failed (${String(err)})`, isError: true }
+  } finally {
+    isStarting = false
+    $.ui.invalidate('ui.render')
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     $.clock.every(POLL_MS, () => {
@@ -171,44 +215,71 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     isShowing = true
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button } = ui
     const [f, session] = await Promise.all([read($, floor), readSessionUsage($)])
     const width = Math.max(24, e.props.bodyColumns)
     const running = openTurns > 0
     const hud = formatTokenHud(session, requestUsage)
-    const refreshButton = (
-      <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => void refresh($)} />
-    )
     const att = f ? attentionOf(f) : null
+    const pic = pictureOf(f, att, running)
+    // Only a step the factory runs itself: hard stop and human merge carry no skill.
+    const skill = att && f && typeof f.next.skill === 'string' && f.next.skill.length > 0 ? f.next.skill : null
+
+    // Terminal: Raster plus an Image badge. Desktop: Svg. Neither draws the other's element.
+    let picture: RenderElement | null = null
+    if (e.surface === 'terminal' && 'Raster' in ui && 'Image' in ui) {
+      const { Raster, Image } = ui
+      const columns = rasterColumns(pic.word, width - 6)
+      picture = (
+        <Box flexDirection="row" gap={1} alignItems="center">
+          <Raster key="floor-picture" columns={columns} rows={RASTER_ROWS} cells={rasterCells(pic, columns)} />
+          <Image key="floor-badge" source={badgeRgba(pic)} columns={4} rows={2} alt={pic.word} />
+        </Box>
+      )
+    } else if (e.surface === 'desktop' && 'Svg' in ui) {
+      const { Svg } = ui
+      picture = <Svg source={svgMarkup(pic)} alt={pic.word} width={Math.min(360, width * 8)} />
+    }
+
     return (
-      <Box
-        flexDirection="column"
-        width={width}
-        borderStyle="round"
-        borderColor={running ? 'green' : undefined}
-        paddingX={1}
-      >
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text bold color={running ? 'green' : undefined} dimColor={!running}>
-            {running ? 'running' : 'idle'}
+      <Box flexDirection="column" width={width}>
+        {picture}
+        <Box flexDirection="row" justifyContent="space-between" marginTop={1}>
+          <Text bold color={running ? 'green' : 'gray'} dimColor={!running}>
+            {running ? '● running' : '○ idle'}
           </Text>
-          {refreshButton}
+          <Box flexDirection="row" gap={2}>
+            {skill ? (
+              <Button
+                key="start"
+                label="Start"
+                hotkey="s"
+                variant="primary"
+                onPress={() => void startSkill($, skill)}
+              />
+            ) : null}
+            <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => void refresh($)} />
+          </Box>
         </Box>
         {!f ? (
           <Text dimColor>Reading factory state…</Text>
         ) : att ? (
-          <Box flexDirection="column" marginTop={1} key="attention">
+          <Box flexDirection="column" key="attention">
             <Text bold color={att.tone} wrap="wrap">
               {att.title}
             </Text>
             <Text wrap="wrap">{att.detail}</Text>
           </Box>
         ) : null}
-        <Box marginTop={1}>
-          <Text dimColor wrap="truncate-end">
-            {hud}
+        {startNote ? (
+          <Text color={startNote.isError ? 'red' : undefined} dimColor={!startNote.isError} wrap="wrap">
+            {startNote.text}
           </Text>
-        </Box>
+        ) : null}
+        <Text dimColor wrap="truncate-end">
+          {hud}
+        </Text>
       </Box>
     )
   })

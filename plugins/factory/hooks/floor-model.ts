@@ -431,3 +431,35 @@ export function floorText(f: FloorSnapshot): string {
   lines.push(f.next.why)
   return lines.join('\n')
 }
+
+// Carried conversation is capped; the newest text is kept.
+const CARRY_MAX_CHARS = 24_000
+
+// "/factory:sdv next" → { command: "factory:sdv", args: "next" }; no args when the skill has none.
+export function skillCommand(skill: string): { command: string; args?: string } {
+  const [name = '', ...rest] = skill.trim().replace(/^\//, '').split(/\s+/)
+  return rest.length ? { command: name, args: rest.join(' ') } : { command: name }
+}
+
+// The user and assistant text this session's transcript holds, newest kept when over the cap.
+export function carriedConversation(messages: readonly { role: string; text: string }[]): string | null {
+  const lines = messages
+    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.text.trim().length > 0)
+    .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text.trim()}`)
+  if (lines.length === 0) return null
+  const kept: string[] = []
+  let size = 0
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? ''
+    if (size + line.length > CARRY_MAX_CHARS) {
+      if (kept.length === 0) kept.unshift(`…${line.slice(line.length - CARRY_MAX_CHARS)}`)
+      break
+    }
+    kept.unshift(line)
+    size += line.length + 2
+  }
+  const truncated = kept.length < lines.length || kept[0]?.startsWith('…')
+  const head = 'Conversation from the left session, carried into this factory run:'
+  const note = truncated ? `\n(Truncated: older text dropped, newest ${kept.length} of ${lines.length} messages kept.)` : ''
+  return `${head}${note}\n\n${kept.join('\n\n')}`
+}

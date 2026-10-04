@@ -8,9 +8,11 @@ import type { On } from 'claude-code'
 
 import {
   attentionOf,
+  carriedConversation,
   deriveFloor,
   formatTokenHud,
   planIsWritten,
+  skillCommand,
   stateDirCandidates,
   usageFromApi,
 } from '../hooks/floor-model'
@@ -83,11 +85,36 @@ const check = (result: 'pass' | 'fail', at = '2026-10-04T11:00:00Z') => ({
 const evidenceMd = (at: string) =>
   `## 🏭 Claude Factory evidence — acme/widget#1\n\n| Generated | ${at} |\n\n> **Human merge required.**\n`
 
-type Host = { files: Record<string, string>; opened: string[]; argv: string[][] }
+type Appended = { type: string; content: { type: string; text?: unknown }[] }
+type Host = {
+  files: Record<string, string>
+  opened: string[]
+  argv: string[][]
+  // What session.messages answers; a string makes the read fail with that reason.
+  transcript: { role: 'user' | 'assistant'; text: string }[] | string
+  reads: number
+  appended: Appended[]
+  commands: { command: string; args: string }[]
+}
+
+// The conversation on the left that Start carries into the factory run.
+const LEFT_USER_TEXT = 'The widget check keeps failing on the date parser, please fix it.'
+const LEFT_ASSISTANT_TEXT = 'I will look at the parser test first.'
 
 // Answer what the mod asks Claude Code for, beneath it, from an in-memory repo.
 function host(on: On, files: Record<string, string>, surfaces: readonly string[] = ['terminal']): Host {
-  const h: Host = { files, opened: [], argv: [] }
+  const h: Host = {
+    files,
+    opened: [],
+    argv: [],
+    transcript: [
+      { role: 'user', text: LEFT_USER_TEXT },
+      { role: 'assistant', text: LEFT_ASSISTANT_TEXT },
+    ],
+    reads: 0,
+    appended: [],
+    commands: [],
+  }
   on('session.cwd', () => ({ value: ROOT }))
   on('session.surfaces', () => ({ value: surfaces as never }))
   on('env.get', () => ({ value: undefined }))
@@ -102,10 +129,54 @@ function host(on: On, files: Record<string, string>, surfaces: readonly string[]
     return { value: { isPlaced: true } }
   })
   on('tool.call', () => ({ result: 'ok' }))
+  on('session.messages', () => {
+    h.reads += 1
+    return typeof h.transcript === 'string'
+      ? { deny: h.transcript }
+      : { value: h.transcript.map(m => ({ ...m, toolUses: [] })) }
+  })
+  // Records the row a plugin appends and refuses it (the kit keeps no rows). As of 2.1.289 the kit
+  // answers a plugin's $.session.append with "no implementation" before any test hook sees it, so
+  // the carried text is checked through carriedConversation below and the pane's note here.
+  on('session.append', ($, e) => {
+    h.appended.push(e.message as Appended)
+    return { deny: 'test host keeps no rows' }
+  })
+  // Stands in for the skill so Start never runs a real /factory:sdv.
+  on('command.run', { command: 'factory:sdv' }, ($, e) => {
+    h.commands.push({ command: e.command, args: e.args })
+    return { text: '' }
+  })
   on('session.usage', () => ({
     value: { startedAt: 1, context: { window: 200_000 }, rateLimits: [], cost: { usd: 0 } },
   }))
   return h
+}
+
+type Found = { type: string; props: Record<string, unknown> }
+
+// The picture: Raster and an Image badge on the terminal, Svg on the desktop, never the other's.
+function expectPicture(surface: (typeof SURFACES)[number], all: Found[]): void {
+  const types = all.map(el => el.type)
+  if (surface === 'terminal') {
+    expect(types).toContain('Raster')
+    expect(types).toContain('Image')
+    expect(types).not.toContain('Svg')
+    const raster = all.find(el => el.type === 'Raster')!
+    const columns = raster.props.columns as number
+    const rows = raster.props.rows as number
+    const bytes = Uint8Array.fromBase64(raster.props.cells as string)
+    expect(bytes.length).toBe(columns * rows * 12)
+    const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.length / 4)
+    expect(words[0]).toBe(0x2580)
+    expect(words[1]).not.toBe(0x01000000)
+    expect(words[2]).not.toBe(0x01000000)
+  } else {
+    expect(types).toContain('Svg')
+    expect(types).not.toContain('Raster')
+    expect(types).not.toContain('Image')
+  }
+  expect(all.find(el => el.type === 'Box' && el.props.borderStyle !== undefined)).toBeUndefined()
 }
 
 // The person typing /factory:floor at the prompt of a fullscreen terminal.
@@ -150,12 +221,13 @@ describe('the pane', () => {
       expect(await ui.find({ text: /1\/8/ })).toBeUndefined()
       const buttons = await ui.findAll({ type: 'Button' })
       expect(buttons.map(b => b.key)).toEqual(['refresh'])
+      expectPicture(surface, await ui.findAll({}))
       await ui.unmount()
     }
   })
 
   test('a failed check is the only action, with no stage rail or evidence dump', async ($, on) => {
-    host(on, {
+    const h = host(on, {
       [`${DIR}/claim.json`]: claim(building),
       [`${DIR}/state.json`]: state({ check_failures: 1, checks_run: 1, last_check: check('fail') }),
       [`${DIR}/plan.md`]: PLAN_WRITTEN,
@@ -170,8 +242,58 @@ describe('the pane', () => {
       expect(await ui.find({ text: /5\/8/ })).toBeUndefined()
       expect(await ui.find({ text: 'cf/1-add-a-widget → main' })).toBeUndefined()
       expect(await ui.find({ text: 'Blocked' })).toBeUndefined()
+      const buttons = await ui.findAll({ type: 'Button' })
+      expect(buttons.map(b => b.key)).toEqual(['start', 'refresh'])
+      expect(buttons[0]?.props).toMatchObject({ label: 'Start', hotkey: 's' })
+      expectPicture(surface, await ui.findAll({}))
+
+      h.reads = 0
+      h.appended.length = 0
+      h.commands.length = 0
+      await ui.press({ key: 'start' })
+      expect(h.reads).toBe(1)
+      for (const row of h.appended) {
+        expect(row.type).toBe('system')
+        expect(row.content.map(b => (b.type === 'text' ? b.text : '')).join('')).toContain(LEFT_USER_TEXT)
+      }
+      expect(await ui.find({ text: /Started \/factory:sdv · / })).toBeDefined()
+      expect(h.commands).toHaveLength(1)
+      expect(h.commands[0]?.command).toBe('factory:sdv')
+      expect(h.commands[0]?.args ?? '').toBe('')
+      expect(h.opened).toEqual([PANE])
+      expect(await ui.find({ text: 'Check failed' })).toBeDefined()
+      expect(await ui.find({ text: /5\/8/ })).toBeUndefined()
       await ui.unmount()
     }
+  })
+
+  test('Start does not run the skill when the session cannot be read', async ($, on) => {
+    const h = host(on, {
+      [`${DIR}/claim.json`]: claim(building),
+      [`${DIR}/state.json`]: state({ check_failures: 1, checks_run: 1, last_check: check('fail') }),
+    })
+    h.transcript = 'transcript unavailable'
+    await run($)
+    const ui = await $.ui.mount({ plugin: 'factory', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+    await ui.press({ key: 'start' })
+    expect(h.appended).toEqual([])
+    expect(h.commands).toEqual([])
+    expect(await ui.find({ text: /Not started: could not read this session/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('Start with an empty transcript carries nothing and still runs the skill', async ($, on) => {
+    const h = host(on, {
+      [`${DIR}/claim.json`]: claim(building),
+      [`${DIR}/state.json`]: state({ check_failures: 1, checks_run: 1, last_check: check('fail') }),
+    })
+    h.transcript = []
+    await run($)
+    const ui = await $.ui.mount({ plugin: 'factory', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+    await ui.press({ key: 'start' })
+    expect(h.appended).toEqual([])
+    expect(h.commands.map(c => c.command)).toEqual(['factory:sdv'])
+    await ui.unmount()
   })
 
   test('hard stop: the blocked check, not the stage rail', async ($, on) => {
@@ -188,6 +310,9 @@ describe('the pane', () => {
       expect(await ui.find({ text: /✗/ })).toBeUndefined()
       const buttons = await ui.findAll({ type: 'Button' })
       expect(buttons.map(b => b.key)).toEqual(['refresh'])
+      expect(await ui.find({ key: 'start' })).toBeUndefined()
+      expect(await ui.find({ type: 'Button', text: /merge/i })).toBeUndefined()
+      expectPicture(surface, await ui.findAll({}))
       await ui.unmount()
     }
   })
@@ -206,10 +331,14 @@ describe('the pane', () => {
       expect(await ui.find({ text: /8\/8/ })).toBeUndefined()
       const buttons = await ui.findAll({ type: 'Button' })
       expect(buttons.map(b => b.key)).toEqual(['refresh'])
+      expect(await ui.find({ key: 'start' })).toBeUndefined()
+      expect(await ui.find({ type: 'Button', text: /merge/i })).toBeUndefined()
+      expectPicture(surface, await ui.findAll({}))
       await ui.press({ key: 'refresh' })
       await ui.unmount()
     }
     expect(h.argv.flat().some(a => /merge|approve/.test(a))).toBe(false)
+    expect(h.commands).toEqual([])
   })
 
   test('redraws when a cf-* call moves the ticket on', async ($, on) => {
@@ -260,6 +389,38 @@ describe('floor model', () => {
     expect(at(claim(building), state({ last_check: check('pass') }), null, evidenceMd('2026-10-04T10:30:00Z'))).toBe('evidence')
     expect(at(claim(building), state({ last_check: check('pass') }), null, evidenceMd('2026-10-04T11:05:00Z'))).toBe('pr')
     expect(at(claim({ ...building, status: 'released' }), state())).toBe('ready')
+  })
+})
+
+describe('Start', () => {
+  test('carries the user and assistant text the transcript holds, labeled', () => {
+    const text = carriedConversation([
+      { role: 'user', text: LEFT_USER_TEXT },
+      { role: 'assistant', text: '' },
+      { role: 'assistant', text: LEFT_ASSISTANT_TEXT },
+    ])
+    expect(text).toContain('Conversation from the left session, carried into this factory run')
+    expect(text).toContain(`User: ${LEFT_USER_TEXT}`)
+    expect(text).toContain(`Assistant: ${LEFT_ASSISTANT_TEXT}`)
+    expect(text).not.toContain('Truncated')
+  })
+
+  test('carries nothing from an empty transcript', () => {
+    expect(carriedConversation([])).toBeNull()
+    expect(carriedConversation([{ role: 'assistant', text: '  ' }])).toBeNull()
+  })
+
+  test('keeps the newest text and says so when over the cap', () => {
+    const old = { role: 'user', text: `old ${'x'.repeat(20_000)}` }
+    const text = carriedConversation([old, { role: 'user', text: `new ${'y'.repeat(20_000)}` }])!
+    expect(text).toContain('Truncated')
+    expect(text).toContain('new y')
+    expect(text).not.toContain('old x')
+  })
+
+  test('the skill becomes a command name without its slash, args only when given', () => {
+    expect(skillCommand('/factory:sdv')).toEqual({ command: 'factory:sdv' })
+    expect(skillCommand('/factory:sdv next')).toEqual({ command: 'factory:sdv', args: 'next' })
   })
 })
 
