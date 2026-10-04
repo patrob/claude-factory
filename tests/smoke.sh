@@ -160,6 +160,17 @@ expect_rc 0 "guarded worktree" cf-worktree
 [[ "$(decision PreToolUse Edit "" "$tmp/widget-cf-3/Makefile")" == allow ]] && ok "worktree edit allowed in guard mode" || bad "worktree edit denied"
 unset CF_PRIMARY_GUARD
 
+echo "floor mod wiring"
+hooks_json="$plugin/hooks/hooks.json"
+jq -e '.modules == ["./floor.tsx"]' "$hooks_json" >/dev/null && [[ -f "$plugin/hooks/floor.tsx" ]] &&
+  ok "hooks.json names the floor module" || bad "modules: $(jq -c .modules "$hooks_json")"
+jq -e '[.hooks.PreToolUse[].hooks[], .hooks.UserPromptSubmit[].hooks[]]
+  | length == 2 and all(.type == "command" and (.command | test("cf-guard\\.sh")))' "$hooks_json" >/dev/null &&
+  ok "cf-guard command hooks kept beside the module" || bad "settings hooks changed: $(jq -c .hooks "$hooks_json")"
+! grep -nE "pr[[:space:]]+(merge|review)|'pr',[[:space:]]*'(merge|review)'|--approve" \
+  "$plugin/hooks/floor.tsx" "$plugin/hooks/floor-model.ts" >/dev/null &&
+  ok "floor mod never merges or approves" || bad "merge in floor mod"
+
 echo
 echo "$pass passed, $fail failed ($(bash -c 'echo $BASH_VERSION'))"
 ((fail == 0))

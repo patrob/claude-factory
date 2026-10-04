@@ -34,7 +34,7 @@ Restart Claude Code (or run `/reload-plugins`) after installing.
 
 ### Requirements
 
-- Claude Code with plugin `bin/` support (v2.1.91 or later)
+- Claude Code with plugin `bin/` support (v2.1.91 or later); the factory-floor pane is a mod and needs v2.1.287 or later
 - `git` 2.31+, [`gh`](https://cli.github.com) (authenticated), and `jq`
 - macOS or Linux, bash 3.2+
 
@@ -46,6 +46,7 @@ The plugin ships executables in `bin/`, so claude.ai and Cowork will not install
 |---|---|
 | `/factory:sdv <ticket>` | Take one ticket to a PR, then stop for a human to merge. `<ticket>` is `owner/repo#N`, an issue URL, `N`, or `next`. |
 | `/factory:watch [status\|once\|drain]` | Show the queue, or drain it one ticket at a time in headless `claude -p` sessions. |
+| `/factory:floor` | Open the factory-floor pane: current ticket, stage, evidence, and the next skill. Read-only. |
 | `cf-reset` (typed as a prompt) | Human only: clear the failure counter after a hard stop. |
 
 Run both from the primary checkout of the repo the tickets belong to.
@@ -64,6 +65,35 @@ Run both from the primary checkout of the repo the tickets belong to.
    **Two failures and it stops.** A hook then blocks Edit, Write, and Bash until a human resets.
 7. **PR + evidence.** Claude pushes the branch. `cf-evidence` builds the evidence pack, which becomes the PR body.
 8. **Stop.** Claude reports the PR and ends its turn. A human reviews and merges.
+
+## Factory floor pane
+
+`/factory:floor` opens a pane that shows where the claimed ticket is in the flow:
+
+- **Ticket**: `repo#N`, title, claim status, who claimed it, the issue URL
+- **Stage**: ready → claim → plan → worktree → check → evidence → PR → human merge, each marked done (✓),
+  current (▶), blocked by the hard stop (✗), or not reached (·), with a one-line note
+- **Evidence**: check command, last result, runs and failures, check log, branch, worktree,
+  the evidence pack once `cf-evidence` has built it for the latest passing check, and the PR
+- **Next**: the skill and step to run next (for example `/factory:sdv` · Step 4 · `cf-worktree`),
+  or the human's move (`cf-reset` after a hard stop, merging the PR at the end)
+
+The pane is a Claude Code **mod** (`hooks/floor.tsx`): a `ui.render` hook on the `Pane` component,
+opened with `$.ui.open`. It is not a webview and not a claude.ai artifact. It reads the same files the
+`cf-*` tools write (`claim.json`, `state.json`, `plan.md`, `evidence.md` in the state dir that
+`hooks/cf-guard.sh` uses) and never writes them. It re-reads them after a Bash call that runs a `cf-*`
+tool, `gh pr create`, `git commit`, or `git push`, after an edit under the state dir, every 10 seconds
+while the pane has been shown (so a `cf-watch` run in another terminal shows up), and when you press
+`r` (Refresh). It has no other button: no merge, no approve, no claim.
+
+Where it draws: the Claude Code CLI in a terminal (docked beside the transcript in a wide fullscreen
+terminal, above the prompt otherwise) and the Code tab of the Claude Desktop app. `claude -p`, the
+Agent SDK, and the VS Code extension's chat panel draw no panes; there `/factory:floor` prints the
+same floor as text. With mods turned off (`--safe-mode`, `--bare`, `disableAllHooks`), the
+`floor` skill runs instead and asks Claude for a read-only text summary from `cf-check --status` and
+`cf-claim --show`.
+
+Typed while Claude is working, `/factory:floor` waits for the turn to end, like any skill command.
 
 ## Readiness rules
 
@@ -202,7 +232,12 @@ plugins/factory/
 ├── .claude-plugin/plugin.json      plugin "factory"
 ├── skills/sdv/SKILL.md             /factory:sdv
 ├── skills/watch/SKILL.md           /factory:watch
-├── hooks/hooks.json                PreToolUse + UserPromptSubmit → hooks/cf-guard.sh
+├── skills/floor/SKILL.md           /factory:floor (text fallback when mods are off)
+├── hooks/hooks.json                PreToolUse + UserPromptSubmit → hooks/cf-guard.sh; modules → floor.tsx
+├── hooks/floor.tsx                 factory-floor pane mod (ui.render Pane + $.ui.open)
+├── hooks/floor-model.ts            stage, evidence, and next-skill derivation from the state files
+├── types/index.d.ts                the mod's $.state contract
+├── tests/floor.test.ts             mod tests for `claude plugin test`
 ├── bin/                            cf-ready cf-claim cf-worktree cf-check cf-evidence cf-watch
 ├── lib/cf-common.sh                shared helpers
 └── templates/                      plan.md evidence.md
@@ -216,7 +251,8 @@ tests/smoke.sh                           # bash on PATH
 CF_TEST_BASH=/bin/bash tests/smoke.sh    # macOS bash 3.2
 claude plugin validate ./plugins/factory
 claude plugin validate .
-claude --plugin-dir ./plugins/factory    # try it without installing
+claude plugin test ./plugins/factory     # factory-floor mod tests, no session needed (v2.1.287+)
+claude --plugin-dir ./plugins/factory    # try it without installing, then /factory:floor
 ```
 
 ## License

@@ -1,5 +1,8 @@
 {
-  "description": "claude-factory: 2-fail hard stop, human-only reset (type cf-reset), never merge",
+  "description": "claude-factory: 2-fail hard stop, human-only reset (type cf-reset), never merge; factory-floor pane mod (/factory:floor)",
+  "modules": [
+    "./floor.tsx"
+  ],
   "hooks": {
     "PreToolUse": [
       {
