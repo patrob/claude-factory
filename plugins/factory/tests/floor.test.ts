@@ -6,7 +6,14 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { deriveFloor, planIsWritten, stateDirCandidates } from '../hooks/floor-model'
+import {
+  attentionOf,
+  deriveFloor,
+  formatTokenHud,
+  planIsWritten,
+  stateDirCandidates,
+  usageFromApi,
+} from '../hooks/floor-model'
 
 const ROOT = '/work/widget'
 const DIR = `${ROOT}/.claude-factory`
@@ -95,6 +102,9 @@ function host(on: On, files: Record<string, string>, surfaces: readonly string[]
     return { value: { isPlaced: true } }
   })
   on('tool.call', () => ({ result: 'ok' }))
+  on('session.usage', () => ({
+    value: { startedAt: 1, context: { window: 200_000 }, rateLimits: [], cost: { usd: 0 } },
+  }))
   return h
 }
 
@@ -126,19 +136,25 @@ describe('/factory:floor', () => {
 })
 
 describe('the pane', () => {
-  test('with no claim: stage Ready, next /factory:sdv next', async ($, on) => {
+  test('with no claim: quiet aside from idle and the token HUD', async ($, on) => {
     host(on, {})
     await run($)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'factory', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
-      expect(await ui.find({ text: 'No ticket claimed.' })).toBeDefined()
-      expect(await ui.find({ text: '1/8 · Ready' })).toBeDefined()
-      expect(await ui.find({ text: '/factory:sdv next' })).toBeDefined()
+      expect(await ui.find({ text: 'idle' })).toBeDefined()
+      expect(await ui.find({ text: /in —/ })).toBeDefined()
+      expect(await ui.find({ text: /out —/ })).toBeDefined()
+      expect(await ui.find({ text: /cached —/ })).toBeDefined()
+      expect(await ui.find({ text: /cost \$0/ })).toBeDefined()
+      expect(await ui.find({ text: 'No ticket claimed.' })).toBeUndefined()
+      expect(await ui.find({ text: /1\/8/ })).toBeUndefined()
+      const buttons = await ui.findAll({ type: 'Button' })
+      expect(buttons.map(b => b.key)).toEqual(['refresh'])
       await ui.unmount()
     }
   })
 
-  test('mid-flow: ticket, stage, evidence and next skill after one failed check', async ($, on) => {
+  test('a failed check is the only action, with no stage rail or evidence dump', async ($, on) => {
     host(on, {
       [`${DIR}/claim.json`]: claim(building),
       [`${DIR}/state.json`]: state({ check_failures: 1, checks_run: 1, last_check: check('fail') }),
@@ -147,18 +163,18 @@ describe('the pane', () => {
     await run($)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'factory', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
-      expect(await ui.find({ text: '#1  Add a widget' })).toBeDefined()
-      expect(await ui.find({ text: '5/8 · Check' })).toBeDefined()
-      expect(await ui.find({ text: /fail · 1 run · 1\/2 failures/ })).toBeDefined()
-      expect(await ui.find({ text: 'cf/1-add-a-widget → main' })).toBeDefined()
-      expect(await ui.find({ text: 'Step 6 · Check' })).toBeDefined()
-      expect(await ui.find({ text: /1 attempt left/ })).toBeDefined()
-      expect(await ui.find({ text: 'HARD STOP' })).toBeUndefined()
+      expect(await ui.find({ text: 'Check failed' })).toBeDefined()
+      expect(await ui.find({ text: /#1 Add a widget/ })).toBeDefined()
+      expect(await ui.find({ text: /\/factory:sdv/ })).toBeDefined()
+      expect(await ui.find({ text: /cf-check/ })).toBeDefined()
+      expect(await ui.find({ text: /5\/8/ })).toBeUndefined()
+      expect(await ui.find({ text: 'cf/1-add-a-widget → main' })).toBeUndefined()
+      expect(await ui.find({ text: 'Blocked' })).toBeUndefined()
       await ui.unmount()
     }
   })
 
-  test('hard stop: banner, check blocked, next move is a human cf-reset', async ($, on) => {
+  test('hard stop: the blocked check, not the stage rail', async ($, on) => {
     host(on, {
       [`${DIR}/claim.json`]: claim(building),
       [`${DIR}/state.json`]: state({ check_failures: 2, checks_run: 2, last_check: check('fail') }),
@@ -166,9 +182,12 @@ describe('the pane', () => {
     await run($)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'factory', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
-      expect(await ui.find({ text: /HARD STOP · cf-check failed 2\/2/ })).toBeDefined()
-      expect(await ui.find({ key: 'stage-check', text: /✗/ })).toBeDefined()
+      expect(await ui.find({ text: 'Blocked' })).toBeDefined()
+      expect(await ui.find({ text: /cf-check failed 2\/2/ })).toBeDefined()
       expect(await ui.find({ text: /cf-reset/ })).toBeDefined()
+      expect(await ui.find({ text: /✗/ })).toBeUndefined()
+      const buttons = await ui.findAll({ type: 'Button' })
+      expect(buttons.map(b => b.key)).toEqual(['refresh'])
       await ui.unmount()
     }
   })
@@ -182,8 +201,9 @@ describe('the pane', () => {
     await run($)
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'factory', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
-      expect(await ui.find({ text: '8/8 · Human merge' })).toBeDefined()
-      expect(await ui.find({ text: /A human reviews the PR/ })).toBeDefined()
+      expect(await ui.find({ text: 'Human merge' })).toBeDefined()
+      expect(await ui.find({ text: /PR #9/ })).toBeDefined()
+      expect(await ui.find({ text: /8\/8/ })).toBeUndefined()
       const buttons = await ui.findAll({ type: 'Button' })
       expect(buttons.map(b => b.key)).toEqual(['refresh'])
       await ui.press({ key: 'refresh' })
@@ -200,16 +220,16 @@ describe('the pane', () => {
     })
     await run($)
     const ui = await $.ui.mount({ plugin: 'factory', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
-    expect(await ui.find({ text: '5/8 · Check' })).toBeDefined()
+    expect(await ui.find({ text: /Steps 5–6 · Build, Check/ })).toBeDefined()
 
     h.files[`${DIR}/state.json`] = state({ checks_run: 1, last_check: check('pass') })
     await $.tool.call({ tool: 'Bash', command: 'cf-check' })
-    expect(await ui.find({ text: '6/8 · Evidence' })).toBeDefined()
+    expect(await ui.find({ text: /Step 7 · Evidence/ })).toBeDefined()
 
     h.files[`${DIR}/evidence.md`] = evidenceMd('2026-10-04T11:05:00Z')
     await $.tool.call({ tool: 'Bash', command: 'cf-evidence' })
-    expect(await ui.find({ text: '7/8 · PR' })).toBeDefined()
-    expect(await ui.find({ text: `${DIR}/evidence.md` })).toBeDefined()
+    expect(await ui.find({ text: /Step 7 · PR/ })).toBeDefined()
+    expect(await ui.find({ text: `${DIR}/evidence.md` })).toBeUndefined()
     await ui.unmount()
   })
 })
@@ -242,3 +262,33 @@ describe('floor model', () => {
     expect(at(claim({ ...building, status: 'released' }), state())).toBe('ready')
   })
 })
+
+describe('attention and token HUD', () => {
+  test('nothing claimed is no attention item', () => {
+    const f = deriveFloor({ repoRoot: ROOT, stateDir: null, claim: null, state: null, plan: null, evidence: null })
+    expect(attentionOf(f)).toBeNull()
+  })
+
+  test('session.usage without a request labels the split fields empty', () => {
+    expect(formatTokenHud({ contextTokens: null, costUsd: 0 }, {
+      inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null,
+    })).toBe('in —  out —  cached —  cost $0')
+    expect(formatTokenHud({ contextTokens: 15500, costUsd: 0.01234 }, {
+      inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null,
+    })).toBe('in+cached 15,500  out —  cached —  cost $0.0123')
+  })
+
+  test('turn.step usage fills in, out, and cached from the API fields', () => {
+    const got = usageFromApi({
+      input_tokens: 10,
+      output_tokens: 2,
+      cache_read_input_tokens: 8,
+      cache_creation_input_tokens: 1,
+      model: 'claude',
+    })
+    expect(got).toEqual({ inputTokens: 10, outputTokens: 2, cacheReadTokens: 8, cacheCreationTokens: 1 })
+    expect(formatTokenHud({ contextTokens: 999, costUsd: 1.2 }, got!)).toBe('in 10  out 2  cached 8  cost $1.20')
+    expect(usageFromApi({ model: 'claude' })).toBeNull()
+  })
+})
+

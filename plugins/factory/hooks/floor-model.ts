@@ -276,6 +276,142 @@ export function deriveFloor(files: FloorFiles): FloorSnapshot {
   }
 }
 
+export type RequestUsage = {
+  inputTokens: number | null
+  outputTokens: number | null
+  cacheReadTokens: number | null
+  cacheCreationTokens: number | null
+}
+
+export type SessionUsageSnap = {
+  // $.session.usage().context.tokens: uncached + cache-write + cache-read together.
+  // Absent until the first response of the live window. Not a substitute for `in`.
+  contextTokens: number | null
+  // $.session.usage().cost.usd. Absent only when the host has no cost ledger.
+  costUsd: number | null
+}
+
+const EMPTY_USAGE: RequestUsage = {
+  inputTokens: null,
+  outputTokens: null,
+  cacheReadTokens: null,
+  cacheCreationTokens: null,
+}
+
+function apiCount(usage: Record<string, unknown>, key: string): number | null {
+  const v = usage[key]
+  return typeof v === "number" && Number.isFinite(v) ? v : null
+}
+
+// The four counts a turn.step result.usage reports for one main-loop request.
+// Anything else is not a number we can show.
+export function usageFromApi(usage: unknown): RequestUsage | null {
+  if (!usage || typeof usage !== "object") return null
+  const rec = usage as Record<string, unknown>
+  const got: RequestUsage = {
+    inputTokens: apiCount(rec, "input_tokens"),
+    outputTokens: apiCount(rec, "output_tokens"),
+    cacheReadTokens: apiCount(rec, "cache_read_input_tokens"),
+    cacheCreationTokens: apiCount(rec, "cache_creation_input_tokens"),
+  }
+  if (
+    got.inputTokens == null &&
+    got.outputTokens == null &&
+    got.cacheReadTokens == null &&
+    got.cacheCreationTokens == null
+  ) {
+    return null
+  }
+  return got
+}
+
+function addCount(a: number | null, b: number | null): number | null {
+  if (a == null && b == null) return null
+  return (a ?? 0) + (b ?? 0)
+}
+
+export function addUsage(a: RequestUsage, b: RequestUsage): RequestUsage {
+  return {
+    inputTokens: addCount(a.inputTokens, b.inputTokens),
+    outputTokens: addCount(a.outputTokens, b.outputTokens),
+    cacheReadTokens: addCount(a.cacheReadTokens, b.cacheReadTokens),
+    cacheCreationTokens: addCount(a.cacheCreationTokens, b.cacheCreationTokens),
+  }
+}
+
+export const ZERO_USAGE = EMPTY_USAGE
+
+function fmtCount(n: number | null): string {
+  if (n == null) return "—"
+  return n.toLocaleString("en-US")
+}
+
+function fmtUsd(n: number | null): string {
+  if (n == null) return "—"
+  if (n === 0) return "$0"
+  const abs = Math.abs(n)
+  if (abs < 1) return `$${n.toFixed(4)}`
+  return `$${n.toFixed(2)}`
+}
+
+// Compact HUD. Per-request counts win when a main-loop turn.step has reported them.
+// Until then, context.tokens is labeled in+cached because the API does not split it,
+// and out / cached stay an em dash rather than a guessed zero.
+export function formatTokenHud(session: SessionUsageSnap, request: RequestUsage): string {
+  const split =
+    request.inputTokens != null ||
+    request.outputTokens != null ||
+    request.cacheReadTokens != null
+  const cost = `cost ${fmtUsd(session.costUsd)}`
+  if (split) {
+    return `in ${fmtCount(request.inputTokens)}  out ${fmtCount(request.outputTokens)}  cached ${fmtCount(request.cacheReadTokens)}  ${cost}`
+  }
+  const inn = session.contextTokens == null ? "in —" : `in+cached ${fmtCount(session.contextTokens)}`
+  return `${inn}  out —  cached —  ${cost}`
+}
+
+export type FloorAttention = {
+  title: string
+  detail: string
+  tone: "red" | "yellow" | "cyan"
+}
+
+// The one thing that needs a person. Null when nothing is claimed and nothing is blocked:
+// the pane stays quiet apart from running/idle and the HUD.
+export function attentionOf(f: FloorSnapshot): FloorAttention | null {
+  const ticket = f.ticket ? `#${f.ticket.number} ${f.ticket.title}` : null
+  if (f.hardStop) {
+    return {
+      title: "Blocked",
+      detail: `${ticket ? `${ticket} · ` : ""}cf-check failed ${f.evidence.failures}/${f.evidence.maxFailures}. A human decides; cf-reset allows more attempts.`,
+      tone: "red",
+    }
+  }
+  if (f.evidence.lastResult === "fail") {
+    return {
+      title: "Check failed",
+      detail: [ticket, f.next.skill, f.next.run].filter(Boolean).join(" · "),
+      tone: "red",
+    }
+  }
+  if (f.current === "merge") {
+    const pr = f.evidence.pr?.match(/\/pull\/(\d+)/)
+    return {
+      title: "Human merge",
+      detail: [ticket, pr ? `PR #${pr[1]}` : "A human reviews and merges."].filter(Boolean).join(" · "),
+      tone: "yellow",
+    }
+  }
+  if (f.ticket && f.next.skill) {
+    return {
+      title: f.next.skill,
+      detail: [ticket, f.next.step].filter(Boolean).join(" · "),
+      tone: "cyan",
+    }
+  }
+  return null
+}
+
 // The floor as plain text: the command's answer where nothing draws a pane (claude -p, VS Code chat).
 export function floorText(f: FloorSnapshot): string {
   const lines: string[] = ['Factory floor']

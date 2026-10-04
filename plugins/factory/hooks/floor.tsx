@@ -1,12 +1,23 @@
-// Factory floor: a pane that shows the claimed ticket, its stage, the evidence so far and
-// the next skill to run. `/factory:floor` opens it. It reads the state the cf-* tools write
-// and never writes it, never merges, and offers no action but Refresh.
+// Factory floor: the one action that needs a person, whether this session is
+// running or idle, and a compact token HUD. `/factory:floor` opens it.
+// It reads the state the cf-* tools write and Claude Code's own usage figures.
+// It never writes factory state, never merges, and offers no action but Refresh.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { FloorSnapshot, FloorStageStatus } from '../types'
-import { STAGES, deriveFloor, floorText, stagePosition, stateDirCandidates } from './floor-model'
+import type { FloorSnapshot } from '../types'
+import {
+  addUsage,
+  attentionOf,
+  deriveFloor,
+  floorText,
+  formatTokenHud,
+  stateDirCandidates,
+  usageFromApi,
+  ZERO_USAGE,
+} from './floor-model'
+import type { RequestUsage, SessionUsageSnap } from './floor-model'
 
 const PANE = 'factory-floor'
 const COMMAND = 'factory:floor'
@@ -19,6 +30,20 @@ const FACTORY_FILE = /claude-factory\//
 
 // True once the pane has drawn in this load of the module: only then do tool calls and the timer re-read state.
 let isShowing = false
+// Main-loop turns in flight. Subagent turns do not flip the floor.
+let openTurns = 0
+// Sum of main-loop turn.step result.usage. Stays empty until a request reports counts.
+let requestUsage: RequestUsage = ZERO_USAGE
+
+function isSubagent(e: { agentId?: unknown }): boolean {
+  return typeof e.agentId === 'string' && e.agentId.length > 0
+}
+
+function noteRequest(usage: unknown): void {
+  const picked = usageFromApi(usage)
+  if (!picked) return
+  requestUsage = addUsage(requestUsage, picked)
+}
 
 async function readText($: EngineInterface, path: string): Promise<string | null> {
   try {
@@ -68,19 +93,55 @@ async function refresh($: EngineInterface): Promise<FloorSnapshot> {
   return snap
 }
 
-const MARK: Record<FloorStageStatus, { glyph: string; color?: string }> = {
-  done: { glyph: '✓', color: 'green' },
-  current: { glyph: '▶', color: 'cyan' },
-  blocked: { glyph: '✗', color: 'red' },
-  todo: { glyph: '·' },
+// cost.usd and context.tokens, nothing else. A missing field stays null.
+async function readSessionUsage($: EngineInterface): Promise<SessionUsageSnap> {
+  try {
+    const usage = await $.session.usage()
+    const tokens = usage.context.tokens
+    const usd = usage.cost?.usd
+    return {
+      contextTokens: typeof tokens === 'number' ? tokens : null,
+      costUsd: typeof usd === 'number' ? usd : null,
+    }
+  } catch {
+    return { contextTokens: null, costUsd: null }
+  }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     $.clock.every(POLL_MS, () => {
-      if (isShowing) void refresh($)
+      if (!isShowing) return
+      void refresh($).finally(() => $.ui.invalidate('ui.render'))
     })
     return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (!isSubagent(e)) {
+      openTurns += 1
+      if (isShowing) $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (!isSubagent(e)) {
+      openTurns = Math.max(0, openTurns - 1)
+      if (isShowing) $.ui.invalidate('ui.render')
+    }
+    return result
+  })
+
+  // Each main-loop request reports input_tokens, output_tokens, and the cache counts.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (!isSubagent(e)) {
+      noteRequest(result.usage)
+      if (isShowing) $.ui.invalidate('ui.render')
+    }
+    return result
   })
 
   // /factory:floor is the plugin's skill command; answering it here opens the pane with no model turn.
@@ -111,123 +172,41 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     isShowing = true
     const { Box, Text, Button } = $.ui.resolve(e)
-    const f = await read($, floor)
+    const [f, session] = await Promise.all([read($, floor), readSessionUsage($)])
     const width = Math.max(24, e.props.bodyColumns)
-    const labelWidth = 10
-
-    const heading = (text: string, extra?: string) => (
-      <Box flexDirection="row" columnGap={1} marginTop={1}>
-        <Text bold>{text}</Text>
-        {extra ? <Text dimColor>{extra}</Text> : null}
-      </Box>
-    )
-    const row = (label: string, value: string, opts: { color?: string; wrap?: 'wrap' | 'truncate-middle' } = {}) => (
-      <Box flexDirection="row">
-        <Box width={labelWidth} flexShrink={0}>
-          <Text dimColor>{label}</Text>
-        </Box>
-        <Text color={opts.color} wrap={opts.wrap ?? 'truncate-middle'}>
-          {value}
-        </Text>
-      </Box>
-    )
+    const running = openTurns > 0
+    const hud = formatTokenHud(session, requestUsage)
     const refreshButton = (
-      <Button key="refresh" label="Refresh" hotkey="r" plain onPress={() => void refresh($)} />
+      <Button key="refresh" label="Refresh" hotkey="r" plain dimColor onPress={() => void refresh($)} />
     )
-
-    if (!f) {
-      return (
-        <Box flexDirection="column" width={width}>
-          <Text dimColor>Reading factory state…</Text>
+    const att = f ? attentionOf(f) : null
+    return (
+      <Box
+        flexDirection="column"
+        width={width}
+        borderStyle="round"
+        borderColor={running ? 'green' : undefined}
+        paddingX={1}
+      >
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold color={running ? 'green' : undefined} dimColor={!running}>
+            {running ? 'running' : 'idle'}
+          </Text>
           {refreshButton}
         </Box>
-      )
-    }
-
-    const at = stagePosition(f.current)
-    const ev = f.evidence
-    const result =
-      ev.lastResult === 'pass' ? '✅ pass' : ev.lastResult === 'fail' ? '❌ fail' : 'not run'
-
-    return (
-      <Box flexDirection="column" width={width}>
-        {f.hardStop ? (
-          <Box flexDirection="column" borderStyle="round" borderColor="red" paddingX={1}>
-            <Text color="red" bold>
-              {`HARD STOP · cf-check failed ${ev.failures}/${ev.maxFailures}`}
+        {!f ? (
+          <Text dimColor>Reading factory state…</Text>
+        ) : att ? (
+          <Box flexDirection="column" marginTop={1} key="attention">
+            <Text bold color={att.tone} wrap="wrap">
+              {att.title}
             </Text>
-            <Text wrap="wrap">A human decides. Typing cf-reset as a prompt allows more attempts.</Text>
+            <Text wrap="wrap">{att.detail}</Text>
           </Box>
         ) : null}
-
-        {heading('Ticket')}
-        {f.ticket ? (
-          <Box flexDirection="column" key="ticket">
-            <Text bold wrap="wrap">{`#${f.ticket.number}  ${f.ticket.title}`}</Text>
-            <Text dimColor wrap="truncate-end">
-              {[f.ticket.repo, f.ticket.status, f.ticket.claimedBy].filter(Boolean).join(' · ')}
-            </Text>
-            <Text dimColor wrap="truncate-middle">{f.ticket.url}</Text>
-          </Box>
-        ) : (
-          <Box flexDirection="column" key="ticket">
-            <Text>No ticket claimed.</Text>
-            <Text dimColor wrap="wrap">
-              {f.repoRoot ? `Queue: open issues labeled factory-ready or sdv in ${f.repoRoot}` : 'Not inside a git repository.'}
-            </Text>
-          </Box>
-        )}
-
-        {heading('Stage', `${at.index + 1}/${STAGES.length} · ${at.label}`)}
-        <Box flexDirection="column" key="stages">
-          {f.stages.map(st => (
-            <Box flexDirection="row" key={`stage-${st.id}`}>
-              <Box width={2} flexShrink={0}>
-                <Text color={MARK[st.status].color} dimColor={st.status === 'todo'}>
-                  {MARK[st.status].glyph}
-                </Text>
-              </Box>
-              <Box width={labelWidth + 2} flexShrink={0}>
-                <Text bold={st.status === 'current' || st.status === 'blocked'} dimColor={st.status === 'todo'}>
-                  {st.label}
-                </Text>
-              </Box>
-              <Text dimColor wrap="truncate-end">
-                {st.note}
-              </Text>
-            </Box>
-          ))}
-        </Box>
-
-        {heading('Evidence')}
-        <Box flexDirection="column" key="evidence">
-          {row('Check', ev.checkCmd ?? '—')}
-          {row('Result', `${result} · ${ev.checksRun} run${ev.checksRun === 1 ? '' : 's'} · ${ev.failures}/${ev.maxFailures} failures`, {
-            color: ev.lastResult === 'fail' ? 'red' : undefined,
-          })}
-          {ev.log ? row('Log', ev.log) : null}
-          {ev.branch ? row('Branch', ev.base ? `${ev.branch} → ${ev.base}` : ev.branch) : null}
-          {ev.worktree ? row('Worktree', ev.worktree) : null}
-          {row('Pack', ev.evidencePath ?? 'not built for this check yet')}
-          {row('PR', ev.pr ?? 'none yet')}
-        </Box>
-
-        {heading('Next')}
-        <Box flexDirection="column" key="next">
-          <Box flexDirection="row" columnGap={1}>
-            <Text bold color={f.next.isHuman ? 'yellow' : 'cyan'}>
-              {f.next.skill ?? 'Human'}
-            </Text>
-            <Text dimColor>{f.next.step}</Text>
-          </Box>
-          {f.next.run ? row('Run', f.next.run, { wrap: 'wrap' }) : null}
-          <Text wrap="wrap">{f.next.why}</Text>
-        </Box>
-
-        <Box flexDirection="row" columnGap={2} marginTop={1}>
-          {refreshButton}
+        <Box marginTop={1}>
           <Text dimColor wrap="truncate-end">
-            {`Human merges · state ${f.updatedAt ?? '—'}`}
+            {hud}
           </Text>
         </Box>
       </Box>
