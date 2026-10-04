@@ -3,3 +3,5 @@
 .claude-factory/*.jsonl
 .claude-factory/*.md
 .claude-factory/runs/
+# Type declarations Claude Code writes beside a mod loaded with --plugin-dir
+plugins/factory/.claude-plugin/types/

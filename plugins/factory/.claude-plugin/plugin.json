@@ -17,5 +17,6 @@
     "worktree",
     "pull-request",
     "hooks"
-  ]
+  ],
+  "types": "./types/index.d.ts"
 }
